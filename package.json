@@ -1,0 +1,15 @@
+{
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "ioredis": "^5.4.1",
+    "nodemon": "^3.1.7",
+    "puppeteer": "^23.5.0",
+    "redis": "^4.7.0"
+  },
+  "scripts": {
+    "start": "node checkRedis.js && node index.mjs",
+    "dev": "node checkRedis.js && nodemon index.mjs"
+  },
+  "type": "module"
+}
