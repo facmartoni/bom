@@ -2,6 +2,7 @@ import express from "express";
 import puppeteer from "puppeteer";
 import Redis from "ioredis";
 import dotenv from "dotenv";
+import client from "prom-client";
 
 dotenv.config();
 
@@ -12,6 +13,20 @@ const HEADLESS = process.env.HEADLESS === "false" ? false : true;
 app.use(express.json());
 
 let browserInstances = 0;
+
+client.collectDefaultMetrics();
+
+// Add a custom gauge for browser instances
+const browserGauge = new client.Gauge({
+  name: "bom_active_browser_instances",
+  help: "Number of active browser instances",
+});
+
+// A metrics endpoint for Prometheus to scrape
+app.get("/metrics", async (req, res) => {
+  res.set("Content-Type", client.register.contentType);
+  res.end(await client.register.metrics());
+});
 
 // Get the latest browser instance ID from Redis
 async function getLatestBrowserInstance() {
@@ -47,6 +62,8 @@ app.post("/launch", async (req, res) => {
     // Store the browser instance in Redis
     await redis.set(browserId, browser.process().pid);
 
+    browserGauge.inc();
+
     res
       .status(200)
       .send({ browserId, message: "Browser launched successfully" });
@@ -74,6 +91,25 @@ app.get("/browsers", async (req, res) => {
   }
 });
 
+// Close a specific browser instance
+app.post("/close/:id", async (req, res) => {
+  try {
+    const browserId = req.params.id;
+    const pid = await redis.get(browserId);
+    if (!pid) {
+      return res.status(404).send({ message: "Browser instance not found" });
+    }
+    process.kill(pid);
+    await redis.del(browserId);
+    browserGauge.dec(); // Decrease active browser count
+
+    res.status(200).send({ message: "Browser instance closed successfully" });
+  } catch (error) {
+    console.error("Error closing browser:", error);
+    res.status(500).send({ message: "Failed to close browser instance" });
+  }
+});
+
 // Close all browser instances
 app.post("/close-all", async (req, res) => {
   try {
@@ -96,6 +132,7 @@ app.post("/close-all", async (req, res) => {
 
     // Reset browserInstances to zero after closing all browsers
     browserInstances = 0;
+    browserGauge.set(0);
 
     res
       .status(200)
