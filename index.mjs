@@ -56,11 +56,21 @@ app.post("/launch", async (req, res) => {
     const browser = await puppeteer.launch({
       headless: HEADLESS,
     });
+
     browserInstances++; // Increment after retrieval to avoid duplicating IDs
     const browserId = `browser_${browserInstances}`;
 
-    // Store the browser instance in Redis
-    await redis.set(browserId, browser.process().pid);
+    // Store the browser instance data in Redis, including WebSocket endpoint
+    const wsEndpoint = browser.wsEndpoint();
+    const browserData = {
+      id: browserId,
+      pid: browser.process().pid,
+      wsEndpoint,
+      numberOfTabs: 0,
+      tabs: [],
+    };
+
+    await redis.set(browserId, JSON.stringify(browserData));
 
     browserGauge.inc();
 
@@ -79,8 +89,8 @@ app.get("/browsers", async (req, res) => {
     const keys = await redis.keys("browser_*");
     const instances = [];
     for (const key of keys) {
-      const pid = await redis.get(key);
-      instances.push({ browserId: key, pid });
+      const browserData = JSON.parse(await redis.get(key));
+      instances.push(browserData);
     }
     res.status(200).send({ instances });
   } catch (error) {
@@ -95,11 +105,11 @@ app.get("/browsers", async (req, res) => {
 app.post("/close/:id", async (req, res) => {
   try {
     const browserId = req.params.id;
-    const pid = await redis.get(browserId);
-    if (!pid) {
+    const browserData = JSON.parse(await redis.get(browserId));
+    if (!browserData) {
       return res.status(404).send({ message: "Browser instance not found" });
     }
-    process.kill(pid);
+    process.kill(browserData.pid);
     await redis.del(browserId);
     browserGauge.dec(); // Decrease active browser count
 
@@ -115,14 +125,14 @@ app.post("/close-all", async (req, res) => {
   try {
     const keys = await redis.keys("browser_*");
     for (const key of keys) {
-      const pid = await redis.get(key);
-      if (pid) {
+      const browserData = JSON.parse(await redis.get(key));
+      if (browserData && browserData.pid) {
         try {
           // Attempt to kill the process directly
-          process.kill(pid);
+          process.kill(browserData.pid);
         } catch (err) {
           if (err.code !== "ESRCH") {
-            console.error(`Error trying to kill PID ${pid}:`, err);
+            console.error(`Error trying to kill PID ${browserData.pid}:`, err);
           }
         }
       }
@@ -140,6 +150,43 @@ app.post("/close-all", async (req, res) => {
   } catch (error) {
     console.error("Error closing all browsers:", error);
     res.status(500).send({ message: "Failed to close all browser instances" });
+  }
+});
+
+// Update a specific browser instance with a new tab
+app.post("/browser/:id/tab", async (req, res) => {
+  try {
+    const browserId = req.params.id;
+    const url = req.body.url || "about:blank";
+    const browserData = JSON.parse(await redis.get(browserId));
+
+    if (!browserData || !browserData.wsEndpoint) {
+      return res.status(404).send({ message: "Browser instance not found" });
+    }
+
+    // Reconnect to the existing browser using the WebSocket endpoint
+    const browser = await puppeteer.connect({
+      browserWSEndpoint: browserData.wsEndpoint,
+    });
+    const page = await browser.newPage();
+    await page.goto(url);
+
+    const tabId = `tab_${browserData.numberOfTabs + 1}`;
+    const tabData = {
+      id: tabId,
+      url,
+      state: "bare",
+    };
+
+    browserData.numberOfTabs += 1;
+    browserData.tabs.push(tabData);
+
+    await redis.set(browserId, JSON.stringify(browserData));
+
+    res.status(200).send({ tabId, message: "Tab opened successfully" });
+  } catch (error) {
+    console.error("Error opening new tab:", error);
+    res.status(500).send({ message: "Failed to open new tab" });
   }
 });
 
