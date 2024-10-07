@@ -13,8 +13,6 @@ const PROXIES = process.env.PROXIES
       return { ip, port, username, password };
     })
   : [];
-const PROXIES_USERNAME = process.env.PROXIES_USERNAME;
-const PROXIES_PASSWORD = process.env.PROXIES_PASSWORD;
 
 const app = express();
 const redis = new Redis(process.env.REDIS_URL);
@@ -62,65 +60,80 @@ app.get("/health", (req, res) => {
 
 // Launch a new browser instance
 app.post("/launch", async (req, res) => {
-  try {
-    // Select a proxy with no browsers opened or the one with the least browsers
-    let selectedProxy = null;
-    let minBrowserCount = Infinity;
+  let retryCount = 0;
+  const maxRetries = 3;
+  let browser = null;
 
-    for (const proxy of PROXIES) {
-      const proxyCountKey = `proxy_count_${proxy.ip}:${proxy.port}`;
-      let browserCount = parseInt(await redis.get(proxyCountKey)) || 0;
+  while (retryCount < maxRetries) {
+    try {
+      // Select a proxy with no browsers opened or the one with the least browsers
+      let selectedProxy = null;
+      let minBrowserCount = Infinity;
 
-      if (browserCount < minBrowserCount) {
-        selectedProxy = proxy;
-        minBrowserCount = browserCount;
+      for (const proxy of PROXIES) {
+        const proxyCountKey = `proxy_count_${proxy.ip}:${proxy.port}`;
+        let browserCount = parseInt(await redis.get(proxyCountKey)) || 0;
+
+        if (browserCount < minBrowserCount) {
+          selectedProxy = proxy;
+          minBrowserCount = browserCount;
+        }
+      }
+
+      if (!selectedProxy) {
+        return res.status(500).send({ message: "No available proxies" });
+      }
+
+      // Launch a new browser instance with the selected proxy and authentication
+      browser = await puppeteer.launch({
+        headless: HEADLESS,
+        args: [
+          `--proxy-server=http://${selectedProxy.ip}:${selectedProxy.port}`,
+        ],
+      });
+
+      browserInstances++; // Increment after retrieval to avoid duplicating IDs
+      const proxyCountKey = `proxy_count_${selectedProxy.ip}:${selectedProxy.port}`;
+      await redis.incr(proxyCountKey);
+      const browserId = `browser_${browserInstances}`;
+
+      // Store the browser instance data in Redis, including WebSocket endpoint
+      const wsEndpoint = browser.wsEndpoint();
+      const browserData = {
+        id: browserId,
+        proxy: { ip: selectedProxy.ip, port: selectedProxy.port },
+        pid: browser.process().pid,
+        wsEndpoint,
+        numberOfTabs: 0,
+        tabs: [],
+      };
+
+      await redis.set(browserId, JSON.stringify(browserData));
+
+      browserGauge.inc();
+
+      res.status(200).send({
+        browserId,
+        proxy: { ip: selectedProxy.ip, port: selectedProxy.port },
+        message: "Browser launched successfully",
+      });
+      return;
+    } catch (error) {
+      console.error("Error launching browser with proxy:", error);
+      retryCount++;
+      if (browser) {
+        await browser.close();
+      }
+      if (retryCount >= maxRetries) {
+        res.status(500).send({
+          message: "Failed to launch browser after multiple attempts",
+          lastTriedProxy: { ip: selectedProxy.ip, port: selectedProxy.port },
+        });
+        return;
       }
     }
-
-    if (!selectedProxy) {
-      return res.status(500).send({ message: "No available proxies" });
-    }
-
-    // Launch a new browser instance with the selected proxy and authentication
-    const browser = await puppeteer.launch({
-      headless: HEADLESS,
-      args: [`--proxy-server=http://${selectedProxy.ip}:${selectedProxy.port}`],
-    });
-
-    // Authenticate with proxy credentials
-    const page = await browser.newPage();
-    await page.authenticate({
-      username: selectedProxy.username,
-      password: selectedProxy.password,
-    });
-
-    browserInstances++; // Increment after retrieval to avoid duplicating IDs
-    const proxyCountKey = `proxy_count_${selectedProxy.ip}:${selectedProxy.port}`;
-    await redis.incr(proxyCountKey);
-    const browserId = `browser_${browserInstances}`;
-
-    // Store the browser instance data in Redis, including WebSocket endpoint
-    const wsEndpoint = browser.wsEndpoint();
-    const browserData = {
-      id: browserId,
-      proxy: { ip: selectedProxy.ip, port: selectedProxy.port },
-      pid: browser.process().pid,
-      wsEndpoint,
-      numberOfTabs: 0,
-      tabs: [],
-    };
-
-    await redis.set(browserId, JSON.stringify(browserData));
-
-    browserGauge.inc();
-
-    res
-      .status(200)
-      .send({ browserId, message: "Browser launched successfully" });
-  } catch (error) {
-    console.error("Error launching browser:", error);
-    res.status(500).send({ message: "Failed to launch browser" });
   }
+  9;
 });
 
 // Retrieve all browser instances
@@ -199,103 +212,7 @@ app.post("/close-all", async (req, res) => {
   }
 });
 
-// Update a specific browser instance with a new tab
-app.post("/browser/:id/tab", async (req, res) => {
-  try {
-    const browserId = req.params.id;
-    const url = req.body.url || "about:blank";
-    const browserData = JSON.parse(await redis.get(browserId));
-
-    if (!browserData || !browserData.wsEndpoint) {
-      return res.status(404).send({ message: "Browser instance not found" });
-    }
-
-    // Reconnect to the existing browser using the WebSocket endpoint
-    const browser = await puppeteer.connect({
-      browserWSEndpoint: browserData.wsEndpoint,
-    });
-    const page = await browser.newPage();
-    await page.goto(url);
-
-    const tabId = `tab_${browserData.numberOfTabs + 1}`;
-    const tabData = {
-      id: tabId,
-      url,
-      state: "bare",
-      targetId: await (async () => {
-        const session = await page.createCDPSession();
-        const info = await session.send("Target.getTargetInfo");
-        return info.targetInfo.targetId;
-      })(), // Store target ID for unique identification
-    };
-
-    browserData.numberOfTabs += 1;
-    browserData.tabs.push(tabData);
-
-    await redis.set(browserId, JSON.stringify(browserData));
-
-    res.status(200).send({ tabId, message: "Tab opened successfully" });
-  } catch (error) {
-    console.error("Error opening new tab:", error);
-    res.status(500).send({ message: "Failed to open new tab" });
-  }
-});
-
-// Navigate to a specific URL in a given tab
-app.post("/browser/:browserId/tab/:tabId/navigate", async (req, res) => {
-  try {
-    const browserId = req.params.browserId;
-    const tabId = req.params.tabId;
-    const newUrl = req.body.url;
-
-    if (!newUrl) {
-      return res.status(400).send({ message: "URL is required" });
-    }
-
-    const browserData = JSON.parse(await redis.get(browserId));
-
-    if (!browserData || !browserData.wsEndpoint) {
-      return res.status(404).send({ message: "Browser instance not found" });
-    }
-
-    const tabData = browserData.tabs.find((tab) => tab.id === tabId);
-    if (!tabData) {
-      return res.status(404).send({ message: "Tab not found" });
-    }
-
-    // Reconnect to the existing browser using the WebSocket endpoint
-    const browser = await puppeteer.connect({
-      browserWSEndpoint: browserData.wsEndpoint,
-    });
-    const pages = await browser.pages();
-    const page = await (async () => {
-      for (const p of pages) {
-        const session = await p.createCDPSession();
-        const info = await session.send("Target.getTargetInfo");
-        if (info.targetInfo.targetId === tabData.targetId) {
-          return p;
-        }
-      }
-      return null;
-    })();
-
-    if (!page) {
-      return res.status(404).send({ message: "Tab page not found" });
-    }
-
-    await page.goto(newUrl);
-
-    // Update tab data with the new URL
-    tabData.url = newUrl;
-    await redis.set(browserId, JSON.stringify(browserData));
-
-    res.status(200).send({ message: "Navigation successful" });
-  } catch (error) {
-    console.error("Error navigating to URL:", error);
-    res.status(500).send({ message: "Failed to navigate to URL" });
-  }
-});
-
+// Endpoint to retrieve proxy usage information
 app.get("/proxies", async (req, res) => {
   try {
     const proxiesInfo = [];
