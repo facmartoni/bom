@@ -68,18 +68,8 @@ app.post("/launch", async (req, res) => {
     let minBrowserCount = Infinity;
 
     for (const proxy of PROXIES) {
-      const keys = await redis.keys(`browser_*`);
-      let browserCount = 0;
-
-      for (const key of keys) {
-        const browserData = JSON.parse(await redis.get(key));
-        if (
-          browserData.proxy.ip === proxy.ip &&
-          browserData.proxy.port === proxy.port
-        ) {
-          browserCount++;
-        }
-      }
+      const proxyCountKey = `proxy_count_${proxy.ip}:${proxy.port}`;
+      let browserCount = parseInt(await redis.get(proxyCountKey)) || 0;
 
       if (browserCount < minBrowserCount) {
         selectedProxy = proxy;
@@ -105,6 +95,8 @@ app.post("/launch", async (req, res) => {
     });
 
     browserInstances++; // Increment after retrieval to avoid duplicating IDs
+    const proxyCountKey = `proxy_count_${selectedProxy.ip}:${selectedProxy.port}`;
+    await redis.incr(proxyCountKey);
     const browserId = `browser_${browserInstances}`;
 
     // Store the browser instance data in Redis, including WebSocket endpoint
@@ -159,6 +151,8 @@ app.post("/close/:id", async (req, res) => {
     }
     process.kill(browserData.pid);
     await redis.del(browserId);
+    const proxyCountKey = `proxy_count_${browserData.proxy.ip}:${browserData.proxy.port}`;
+    await redis.decr(proxyCountKey);
     browserGauge.dec(); // Decrease active browser count
 
     res.status(200).send({ message: "Browser instance closed successfully" });
@@ -191,6 +185,10 @@ app.post("/close-all", async (req, res) => {
     // Reset browserInstances to zero after closing all browsers
     browserInstances = 0;
     browserGauge.set(0);
+    for (const proxy of PROXIES) {
+      const proxyCountKey = `proxy_count_${proxy.ip}:${proxy.port}`;
+      await redis.set(proxyCountKey, 0);
+    }
 
     res
       .status(200)
@@ -295,6 +293,24 @@ app.post("/browser/:browserId/tab/:tabId/navigate", async (req, res) => {
   } catch (error) {
     console.error("Error navigating to URL:", error);
     res.status(500).send({ message: "Failed to navigate to URL" });
+  }
+});
+
+app.get("/proxies", async (req, res) => {
+  try {
+    const proxiesInfo = [];
+    for (const proxy of PROXIES) {
+      const proxyCountKey = `proxy_count_${proxy.ip}:${proxy.port}`;
+      const browserCount = parseInt(await redis.get(proxyCountKey)) || 0;
+      proxiesInfo.push({
+        proxy: `${proxy.ip}:${proxy.port}`,
+        browserCount,
+      });
+    }
+    res.status(200).send({ proxies: proxiesInfo });
+  } catch (error) {
+    console.error("Error retrieving proxy information:", error);
+    res.status(500).send({ message: "Failed to retrieve proxy information" });
   }
 });
 
