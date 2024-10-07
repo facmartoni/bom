@@ -211,6 +211,21 @@ app.post("/close-all", async (req, res) => {
   }
 });
 
+async function closeAllBrowsers() {
+  try {
+    const response = await fetch(`http://localhost:${PORT}/close-all`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+    });
+    const result = await response.json();
+    console.log("Successfully called /close-all:", result);
+  } catch (error) {
+    console.error("Error calling /close-all:", error);
+  }
+}
+
 // Endpoint to retrieve proxy usage information
 app.get("/proxies", async (req, res) => {
   try {
@@ -332,6 +347,41 @@ app.post("/browser/:browserId/tab/:tabId/navigate", async (req, res) => {
   }
 });
 
+// Define the function to transform a tab into a ready-to-search city tab
+async function prepareTabForCitySearch(page) {
+  const url = process.env.MARKETPLACE_URL;
+  await page.goto(url, { waitUntil: "domcontentloaded" });
+
+  // Handle Cookies Modal
+  const allowCookiesSelector = 'div[aria-label="Allow all cookies"]';
+  if ((await page.$(allowCookiesSelector)) !== null) {
+    await page.click(allowCookiesSelector);
+  } else {
+    console.log("No cookie consent popup found.");
+  }
+
+  // Handle Login Modal
+  try {
+    await page.waitForSelector('div[role="button"][aria-label="Close"]', {
+      timeout: 5000,
+    });
+    await page.click('div[role="button"][aria-label="Close"]');
+  } catch (error) {
+    console.log("No login modal found.");
+  }
+
+  await page.waitForSelector("#seo_filters", { timeout: 5000 });
+  await page.click("#seo_filters");
+
+  const inputSelector = 'input[aria-label="Location"]';
+  await page.waitForSelector(inputSelector, { timeout: 5000 });
+  await page.focus(inputSelector);
+  await new Promise((r) => setTimeout(r, 200)); // Adding a small delay for stability
+  await page.evaluate((selector) => {
+    document.querySelector(selector).value = "";
+  }, inputSelector);
+}
+
 // Launch a new browser instance from a given proxy
 app.post("/launch-from-proxy", async (req, res) => {
   const { proxy } = req.body;
@@ -383,38 +433,8 @@ app.post("/launch-from-proxy", async (req, res) => {
 
     browserGauge.inc();
 
-    // Execute the logic in the tab
-    const url = process.env.MARKETPLACE_URL;
-    await page.goto(url, { waitUntil: "domcontentloaded" });
-
-    // Handle Cookies Modal
-    const allowCookiesSelector = 'div[aria-label="Allow all cookies"]';
-    if ((await page.$(allowCookiesSelector)) !== null) {
-      await page.click(allowCookiesSelector);
-    } else {
-      console.log("No cookie consent popup found.");
-    }
-
-    // Handle Login Modal
-    try {
-      await page.waitForSelector('div[role="button"][aria-label="Close"]', {
-        timeout: 5000,
-      });
-      await page.click('div[role="button"][aria-label="Close"]');
-    } catch (error) {
-      console.log("No login modal found.");
-    }
-
-    await page.waitForSelector("#seo_filters", { timeout: 5000 });
-    await page.click("#seo_filters");
-
-    const inputSelector = 'input[aria-label="Location"]';
-    await page.waitForSelector(inputSelector, { timeout: 5000 });
-    await page.focus(inputSelector);
-    await new Promise((r) => setTimeout(r, 200)); // Adding a small delay for stability
-    await page.evaluate((selector) => {
-      document.querySelector(selector).value = "";
-    }, inputSelector);
+    // Call the function to prepare the tab for city search
+    await prepareTabForCitySearch(page);
 
     // Update tab state to "completed"
     tabData.state = "city_search_ready";
@@ -433,9 +453,36 @@ app.post("/launch-from-proxy", async (req, res) => {
   }
 });
 
+async function launchBrowserWithRandomProxy() {
+  const proxies = process.env.PROXIES.split(",").map((proxy) => {
+    const [ip, port] = proxy.split(":");
+    return { ip, port };
+  });
+  const randomProxy = proxies[Math.floor(Math.random() * proxies.length)];
+
+  try {
+    const response = await fetch(`http://localhost:${PORT}/launch-from-proxy`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        proxy: {
+          ip: randomProxy.ip,
+          port: randomProxy.port,
+        },
+      }),
+    });
+    const data = await response.text();
+    console.log("Successfully called /launch-from-proxy:", data);
+  } catch (error) {
+    console.error("Error calling /launch-from-proxy:", error);
+  }
+}
+
 // Endpoint to search for a city in the available tabs
 app.post("/search-city", async (req, res) => {
-  const { city } = req.body;
+  const { city, sure } = req.body;
   if (!city) {
     return res.status(400).send({ message: "City is required" });
   }
@@ -499,74 +546,79 @@ app.post("/search-city", async (req, res) => {
 
     await page.waitForSelector(inputSelector, { timeout: 5000 });
     await page.focus(inputSelector);
-    await page.evaluate((selector) => {
-      const inputElement = document.querySelector(selector);
-      inputElement.value = ""; // Clear the input value
-      inputElement.dispatchEvent(new Event("input", { bubbles: true })); // Trigger input event
-      inputElement.dispatchEvent(new Event("change", { bubbles: true })); // Trigger change event
-    }, inputSelector);
-    await page.keyboard.press("End"); // Move cursor to the end
-    await page.keyboard.down("Control");
-    await page.keyboard.press("A"); // Select all text
-    await page.keyboard.up("Control");
-    await page.keyboard.press("Backspace"); // Delete selected text
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    await page.type(inputSelector, city, { delay: 50 }); // Type with a slight delay between keystrokes
-    await page.evaluate(
-      (selector, value) => {
-        const inputElement = document.querySelector(selector);
-        inputElement.value = value; // Ensure the value is set
-        inputElement.dispatchEvent(new Event("input", { bubbles: true }));
-        inputElement.dispatchEvent(new Event("change", { bubbles: true }));
-      },
-      inputSelector,
-      city
-    );
+    await clearAndType(page, inputSelector, city);
 
     await page.waitForSelector('ul[role="listbox"]', { timeout: 5000 });
     await page.waitForSelector('ul[role="listbox"] li', { timeout: 10000 });
 
-    // Extract values from each li element
-    const jsonData = await page.evaluate(() => {
-      const items = Array.from(
-        document.querySelectorAll('ul[role="listbox"] li')
-      );
-      return items.map((item) => {
-        const spans = item.querySelectorAll("span");
-        return {
-          firstValue: spans[0] ? spans[0].innerText : null,
-          secondValue: spans[1] ? spans[1].innerText : null,
-        };
-      });
-    });
+    let jsonData = null;
+    if (sure === "true") {
+      // Click on the first suggestion
+      await page.click('ul[role="listbox"] li:first-child');
 
-    try {
-      res.status(200).send({ data: jsonData });
-    } finally {
-      await page.focus(inputSelector);
-      await page.evaluate((selector) => {
-        const inputElement = document.querySelector(selector);
-        inputElement.value = ""; // Clear the input value
-        inputElement.dispatchEvent(new Event("input", { bubbles: true })); // Trigger input event
-        inputElement.dispatchEvent(new Event("change", { bubbles: true })); // Trigger change event
-      }, inputSelector);
-      await page.keyboard.press("End"); // Move cursor to the end
-      await page.keyboard.down("Control");
-      await page.keyboard.press("A"); // Select all text
-      await page.keyboard.up("Control");
-      await page.keyboard.press("Backspace"); // Delete selected text
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      await page.type(inputSelector, "asdasdasd", { delay: 50 }); // Type with a slight delay between keystrokes
-      await page.evaluate(
-        (selector, value) => {
-          const inputElement = document.querySelector(selector);
-          inputElement.value = value; // Ensure the value is set
-          inputElement.dispatchEvent(new Event("input", { bubbles: true }));
-          inputElement.dispatchEvent(new Event("change", { bubbles: true }));
-        },
-        inputSelector,
-        "asdasdasd"
+      for (let i = 0; i < 4; i++) {
+        await page.keyboard.press("Tab");
+        await new Promise((r) => setTimeout(r, 100));
+      }
+
+      await page.keyboard.press("Enter");
+
+      // Wait for the URL to change without waiting for all resources to load
+      await page.waitForNavigation({ waitUntil: "domcontentloaded" });
+
+      const currentUrl = page.url();
+      const cityMatch = currentUrl.match(/\/marketplace\/([^/]+)/);
+      const city = cityMatch ? cityMatch[1] : "unknown";
+
+      jsonData = city;
+
+      // Update browser data in Redis
+      browserData.tabs = browserData.tabs.filter(
+        (tab) => tab.targetId !== readyTab.targetId
       );
+      browserData.numberOfTabs--;
+      await redis.set(browserData.id, JSON.stringify(browserData));
+
+      // Close the tab
+      await page.close();
+
+      try {
+        res.status(200).send({ data: jsonData });
+      } finally {
+        const newTab = await browser.newPage();
+        await prepareTabForCitySearch(newTab); // Use the prepareTabForCitySearch function
+
+        // Update browser data in Redis with the new tab information
+        browserData.tabs.push({
+          targetId: await (async () => {
+            const session = await newTab.createCDPSession();
+            const info = await session.send("Target.getTargetInfo");
+            return info.targetInfo.targetId;
+          })(),
+          url: newTab.url(),
+          state: "city_search_ready",
+        });
+        await redis.set(browserData.id, JSON.stringify(browserData));
+      }
+    } else {
+      // Extract values from each li element
+      jsonData = await page.evaluate(() => {
+        const items = Array.from(
+          document.querySelectorAll('ul[role="listbox"] li')
+        );
+        return items.map((item) => {
+          const spans = item.querySelectorAll("span");
+          return {
+            firstValue: spans[0] ? spans[0].innerText : null,
+            secondValue: spans[1] ? spans[1].innerText : null,
+          };
+        });
+      });
+      try {
+        res.status(200).send({ data: jsonData });
+      } finally {
+        await clearAndType(page, inputSelector, "asdasdasd");
+      }
     }
   } catch (error) {
     console.error("Error searching city:", error);
@@ -574,37 +626,39 @@ app.post("/search-city", async (req, res) => {
   }
 });
 
+async function clearAndType(page, selector, value) {
+  await page.evaluate((selector) => {
+    const inputElement = document.querySelector(selector);
+    inputElement.value = ""; // Clear the input value
+    inputElement.dispatchEvent(new Event("input", { bubbles: true })); // Trigger input event
+    inputElement.dispatchEvent(new Event("change", { bubbles: true })); // Trigger change event
+  }, selector);
+  await page.keyboard.press("End"); // Move cursor to the end
+  await page.keyboard.down("Control");
+  await page.keyboard.press("A"); // Select all text
+  await page.keyboard.up("Control");
+  await page.keyboard.press("Backspace"); // Delete selected text
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  await page.type(selector, value, { delay: 50 }); // Type with a slight delay between keystrokes
+  await page.evaluate(
+    (selector, value) => {
+      const inputElement = document.querySelector(selector);
+      inputElement.value = value; // Ensure the value is set
+      inputElement.dispatchEvent(new Event("input", { bubbles: true }));
+      inputElement.dispatchEvent(new Event("change", { bubbles: true }));
+    },
+    selector,
+    value
+  );
+}
+
 app.listen(PORT, (err) => {
   if (err) {
     console.error(`Error starting server on port ${PORT}:`, err);
     process.exit(1);
   } else {
     console.log(`BOM running on port ${PORT}`);
-
-    const proxies = process.env.PROXIES.split(",").map((proxy) => {
-      const [ip, port] = proxy.split(":");
-      return { ip, port };
-    });
-    const randomProxy = proxies[Math.floor(Math.random() * proxies.length)];
-
-    fetch(`http://localhost:${PORT}/launch-from-proxy`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        proxy: {
-          ip: randomProxy.ip,
-          port: randomProxy.port,
-        },
-      }),
-    })
-      .then((response) => response.text())
-      .then((data) => {
-        console.log("Successfully called /launch-from-proxy:", data);
-      })
-      .catch((error) => {
-        console.error("Error calling /launch-from-proxy:", error);
-      });
+    closeAllBrowsers();
+    launchBrowserWithRandomProxy();
   }
 });
