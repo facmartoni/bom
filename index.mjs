@@ -297,23 +297,28 @@ app.post("/browser/:browserId/tab/:tabId/navigate", async (req, res) => {
     // Reconnect to the existing browser using the WebSocket endpoint
     const browser = await puppeteer.connect({
       browserWSEndpoint: browserData.wsEndpoint,
+      defaultViewport: { width: 1280, height: 800 }, // Ensure consistent viewport
     });
     const pages = await browser.pages();
-    const page = await (async () => {
+    let page = pages.find((p) => p.url() === tabData.url);
+
+    if (!page) {
+      console.log("Tab not found by URL. Checking by target ID...");
       for (const p of pages) {
         const session = await p.createCDPSession();
         const info = await session.send("Target.getTargetInfo");
         if (info.targetInfo.targetId === tabData.targetId) {
-          return p;
+          page = p;
+          break;
         }
       }
-      return null;
-    })();
+    }
 
     if (!page) {
       return res.status(404).send({ message: "Tab page not found" });
     }
 
+    await page.setViewport({ width: 1280, height: 800 }); // Set consistent viewport size
     await page.goto(newUrl);
 
     // Update tab data with the new URL
@@ -356,6 +361,11 @@ app.post("/launch-from-proxy", async (req, res) => {
       id: tabId,
       url: "about:blank",
       state: "pending",
+      targetId: await (async () => {
+        const session = await page.createCDPSession();
+        const info = await session.send("Target.getTargetInfo");
+        return info.targetInfo.targetId;
+      })(), // Store target ID for unique identification
     };
 
     // Store the browser instance data in Redis, including WebSocket endpoint
@@ -420,6 +430,147 @@ app.post("/launch-from-proxy", async (req, res) => {
     res
       .status(500)
       .send({ message: "Failed to launch browser with provided proxy" });
+  }
+});
+
+// Endpoint to search for a city in the available tabs
+app.post("/search-city", async (req, res) => {
+  const { city } = req.body;
+  if (!city) {
+    return res.status(400).send({ message: "City is required" });
+  }
+
+  try {
+    const keys = await redis.keys("browser_*");
+    let selectedBrowser = null;
+    let minTabsCount = Infinity;
+
+    for (const key of keys) {
+      const browserData = JSON.parse(await redis.get(key));
+      const readyTab = browserData.tabs.find(
+        (tab) => tab.state === "city_search_ready"
+      );
+      if (readyTab && browserData.numberOfTabs < minTabsCount) {
+        selectedBrowser = { browserData, readyTab };
+        minTabsCount = browserData.numberOfTabs;
+      }
+    }
+
+    if (!selectedBrowser) {
+      return res
+        .status(404)
+        .send({ message: "No browser with a ready tab found" });
+    }
+
+    const { browserData, readyTab } = selectedBrowser;
+
+    // Reconnect to the existing browser using the WebSocket endpoint
+    const browser = await puppeteer.connect({
+      browserWSEndpoint: browserData.wsEndpoint,
+      defaultViewport: { width: 1280, height: 800 },
+    });
+    const pages = await browser.pages();
+    let page = null;
+
+    // Check for the page using the targetId directly
+    for (const p of pages) {
+      const session = await p.createCDPSession();
+      const info = await session.send("Target.getTargetInfo");
+      if (info.targetInfo.targetId === readyTab.targetId) {
+        page = p;
+        break;
+      }
+    }
+
+    // If page is still not found, log the available pages for debugging
+    if (!page) {
+      console.log("Available pages:");
+      for (const p of pages) {
+        const session = await p.createCDPSession();
+        const info = await session.send("Target.getTargetInfo");
+        console.log(
+          `Page URL: ${await p.url()}, Target ID: ${info.targetInfo.targetId}`
+        );
+      }
+      return res.status(404).send({ message: "Tab page not found" });
+    }
+
+    const inputSelector = 'input[aria-label="Location"]';
+
+    await page.waitForSelector(inputSelector, { timeout: 5000 });
+    await page.focus(inputSelector);
+    await page.evaluate((selector) => {
+      const inputElement = document.querySelector(selector);
+      inputElement.value = ""; // Clear the input value
+      inputElement.dispatchEvent(new Event("input", { bubbles: true })); // Trigger input event
+      inputElement.dispatchEvent(new Event("change", { bubbles: true })); // Trigger change event
+    }, inputSelector);
+    await page.keyboard.press("End"); // Move cursor to the end
+    await page.keyboard.down("Control");
+    await page.keyboard.press("A"); // Select all text
+    await page.keyboard.up("Control");
+    await page.keyboard.press("Backspace"); // Delete selected text
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await page.type(inputSelector, city, { delay: 50 }); // Type with a slight delay between keystrokes
+    await page.evaluate(
+      (selector, value) => {
+        const inputElement = document.querySelector(selector);
+        inputElement.value = value; // Ensure the value is set
+        inputElement.dispatchEvent(new Event("input", { bubbles: true }));
+        inputElement.dispatchEvent(new Event("change", { bubbles: true }));
+      },
+      inputSelector,
+      city
+    );
+
+    await page.waitForSelector('ul[role="listbox"]', { timeout: 5000 });
+    await page.waitForSelector('ul[role="listbox"] li', { timeout: 10000 });
+
+    // Extract values from each li element
+    const jsonData = await page.evaluate(() => {
+      const items = Array.from(
+        document.querySelectorAll('ul[role="listbox"] li')
+      );
+      return items.map((item) => {
+        const spans = item.querySelectorAll("span");
+        return {
+          firstValue: spans[0] ? spans[0].innerText : null,
+          secondValue: spans[1] ? spans[1].innerText : null,
+        };
+      });
+    });
+
+    try {
+      res.status(200).send({ data: jsonData });
+    } finally {
+      await page.focus(inputSelector);
+      await page.evaluate((selector) => {
+        const inputElement = document.querySelector(selector);
+        inputElement.value = ""; // Clear the input value
+        inputElement.dispatchEvent(new Event("input", { bubbles: true })); // Trigger input event
+        inputElement.dispatchEvent(new Event("change", { bubbles: true })); // Trigger change event
+      }, inputSelector);
+      await page.keyboard.press("End"); // Move cursor to the end
+      await page.keyboard.down("Control");
+      await page.keyboard.press("A"); // Select all text
+      await page.keyboard.up("Control");
+      await page.keyboard.press("Backspace"); // Delete selected text
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await page.type(inputSelector, "asdasdasd", { delay: 50 }); // Type with a slight delay between keystrokes
+      await page.evaluate(
+        (selector, value) => {
+          const inputElement = document.querySelector(selector);
+          inputElement.value = value; // Ensure the value is set
+          inputElement.dispatchEvent(new Event("input", { bubbles: true }));
+          inputElement.dispatchEvent(new Event("change", { bubbles: true }));
+        },
+        inputSelector,
+        "asdasdasd"
+      );
+    }
+  } catch (error) {
+    console.error("Error searching city:", error);
+    res.status(500).send({ message: "Failed to search city" });
   }
 });
 
