@@ -580,5 +580,31 @@ app.listen(PORT, (err) => {
     process.exit(1);
   } else {
     console.log(`BOM running on port ${PORT}`);
+
+    const proxies = process.env.PROXIES.split(",").map((proxy) => {
+      const [ip, port] = proxy.split(":");
+      return { ip, port };
+    });
+    const randomProxy = proxies[Math.floor(Math.random() * proxies.length)];
+
+    fetch(`http://localhost:${PORT}/launch-from-proxy`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        proxy: {
+          ip: randomProxy.ip,
+          port: randomProxy.port,
+        },
+      }),
+    })
+      .then((response) => response.text())
+      .then((data) => {
+        console.log("Successfully called /launch-from-proxy:", data);
+      })
+      .catch((error) => {
+        console.error("Error calling /launch-from-proxy:", error);
+      });
   }
 });
