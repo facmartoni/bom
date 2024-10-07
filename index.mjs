@@ -327,6 +327,102 @@ app.post("/browser/:browserId/tab/:tabId/navigate", async (req, res) => {
   }
 });
 
+// Launch a new browser instance from a given proxy
+app.post("/launch-from-proxy", async (req, res) => {
+  const { proxy } = req.body;
+  if (!proxy || !proxy.ip || !proxy.port) {
+    return res.status(400).send({ message: "Proxy IP and port are required" });
+  }
+
+  try {
+    // Launch a new browser instance with the provided proxy
+    const browser = await puppeteer.launch({
+      headless: HEADLESS,
+      args: [`--proxy-server=http://${proxy.ip}:${proxy.port}`],
+      defaultViewport: { width: 1280, height: 800 },
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36",
+    });
+
+    browserInstances++;
+    const proxyCountKey = `proxy_count_${proxy.ip}:${proxy.port}`;
+    await redis.incr(proxyCountKey);
+    const browserId = `browser_${browserInstances}`;
+
+    // Create a new tab with state "pending"
+    const page = await browser.newPage();
+    const tabId = `tab_1`;
+    const tabData = {
+      id: tabId,
+      url: "about:blank",
+      state: "pending",
+    };
+
+    // Store the browser instance data in Redis, including WebSocket endpoint
+    const wsEndpoint = browser.wsEndpoint();
+    const browserData = {
+      id: browserId,
+      proxy: { ip: proxy.ip, port: proxy.port },
+      pid: browser.process().pid,
+      wsEndpoint,
+      numberOfTabs: 1,
+      tabs: [tabData],
+    };
+
+    await redis.set(browserId, JSON.stringify(browserData));
+
+    browserGauge.inc();
+
+    // Execute the logic in the tab
+    const url = process.env.MARKETPLACE_URL;
+    await page.goto(url, { waitUntil: "domcontentloaded" });
+
+    // Handle Cookies Modal
+    const allowCookiesSelector = 'div[aria-label="Allow all cookies"]';
+    if ((await page.$(allowCookiesSelector)) !== null) {
+      await page.click(allowCookiesSelector);
+    } else {
+      console.log("No cookie consent popup found.");
+    }
+
+    // Handle Login Modal
+    try {
+      await page.waitForSelector('div[role="button"][aria-label="Close"]', {
+        timeout: 5000,
+      });
+      await page.click('div[role="button"][aria-label="Close"]');
+    } catch (error) {
+      console.log("No login modal found.");
+    }
+
+    await page.waitForSelector("#seo_filters", { timeout: 5000 });
+    await page.click("#seo_filters");
+
+    const inputSelector = 'input[aria-label="Location"]';
+    await page.waitForSelector(inputSelector, { timeout: 5000 });
+    await page.focus(inputSelector);
+    await new Promise((r) => setTimeout(r, 200)); // Adding a small delay for stability
+    await page.evaluate((selector) => {
+      document.querySelector(selector).value = "";
+    }, inputSelector);
+
+    // Update tab state to "completed"
+    tabData.state = "city_search_ready";
+    await redis.set(browserId, JSON.stringify(browserData));
+
+    res.status(200).send({
+      browserId,
+      tabId,
+      message: "Browser launched and City Search Tab opened successfully",
+    });
+  } catch (error) {
+    console.error("Error launching browser with provided proxy:", error);
+    res
+      .status(500)
+      .send({ message: "Failed to launch browser with provided proxy" });
+  }
+});
+
 app.listen(PORT, (err) => {
   if (err) {
     console.error(`Error starting server on port ${PORT}:`, err);
