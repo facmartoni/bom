@@ -6,6 +6,16 @@ import client from "prom-client";
 
 dotenv.config();
 
+// Load proxies from environment variables
+const PROXIES = process.env.PROXIES
+  ? process.env.PROXIES.split(",").map((proxy) => {
+      const [ip, port, username, password] = proxy.split(":");
+      return { ip, port, username, password };
+    })
+  : [];
+const PROXIES_USERNAME = process.env.PROXIES_USERNAME;
+const PROXIES_PASSWORD = process.env.PROXIES_PASSWORD;
+
 const app = express();
 const redis = new Redis(process.env.REDIS_URL);
 const PORT = process.env.PORT || 3000;
@@ -53,8 +63,45 @@ app.get("/health", (req, res) => {
 // Launch a new browser instance
 app.post("/launch", async (req, res) => {
   try {
+    // Select a proxy with no browsers opened or the one with the least browsers
+    let selectedProxy = null;
+    let minBrowserCount = Infinity;
+
+    for (const proxy of PROXIES) {
+      const keys = await redis.keys(`browser_*`);
+      let browserCount = 0;
+
+      for (const key of keys) {
+        const browserData = JSON.parse(await redis.get(key));
+        if (
+          browserData.proxy.ip === proxy.ip &&
+          browserData.proxy.port === proxy.port
+        ) {
+          browserCount++;
+        }
+      }
+
+      if (browserCount < minBrowserCount) {
+        selectedProxy = proxy;
+        minBrowserCount = browserCount;
+      }
+    }
+
+    if (!selectedProxy) {
+      return res.status(500).send({ message: "No available proxies" });
+    }
+
+    // Launch a new browser instance with the selected proxy and authentication
     const browser = await puppeteer.launch({
       headless: HEADLESS,
+      args: [`--proxy-server=http://${selectedProxy.ip}:${selectedProxy.port}`],
+    });
+
+    // Authenticate with proxy credentials
+    const page = await browser.newPage();
+    await page.authenticate({
+      username: selectedProxy.username,
+      password: selectedProxy.password,
     });
 
     browserInstances++; // Increment after retrieval to avoid duplicating IDs
@@ -64,6 +111,7 @@ app.post("/launch", async (req, res) => {
     const wsEndpoint = browser.wsEndpoint();
     const browserData = {
       id: browserId,
+      proxy: { ip: selectedProxy.ip, port: selectedProxy.port },
       pid: browser.process().pid,
       wsEndpoint,
       numberOfTabs: 0,
