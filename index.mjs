@@ -176,6 +176,11 @@ app.post("/browser/:id/tab", async (req, res) => {
       id: tabId,
       url,
       state: "bare",
+      targetId: await (async () => {
+        const session = await page.createCDPSession();
+        const info = await session.send("Target.getTargetInfo");
+        return info.targetInfo.targetId;
+      })(), // Store target ID for unique identification
     };
 
     browserData.numberOfTabs += 1;
@@ -187,6 +192,61 @@ app.post("/browser/:id/tab", async (req, res) => {
   } catch (error) {
     console.error("Error opening new tab:", error);
     res.status(500).send({ message: "Failed to open new tab" });
+  }
+});
+
+// Navigate to a specific URL in a given tab
+app.post("/browser/:browserId/tab/:tabId/navigate", async (req, res) => {
+  try {
+    const browserId = req.params.browserId;
+    const tabId = req.params.tabId;
+    const newUrl = req.body.url;
+
+    if (!newUrl) {
+      return res.status(400).send({ message: "URL is required" });
+    }
+
+    const browserData = JSON.parse(await redis.get(browserId));
+
+    if (!browserData || !browserData.wsEndpoint) {
+      return res.status(404).send({ message: "Browser instance not found" });
+    }
+
+    const tabData = browserData.tabs.find((tab) => tab.id === tabId);
+    if (!tabData) {
+      return res.status(404).send({ message: "Tab not found" });
+    }
+
+    // Reconnect to the existing browser using the WebSocket endpoint
+    const browser = await puppeteer.connect({
+      browserWSEndpoint: browserData.wsEndpoint,
+    });
+    const pages = await browser.pages();
+    const page = await (async () => {
+      for (const p of pages) {
+        const session = await p.createCDPSession();
+        const info = await session.send("Target.getTargetInfo");
+        if (info.targetInfo.targetId === tabData.targetId) {
+          return p;
+        }
+      }
+      return null;
+    })();
+
+    if (!page) {
+      return res.status(404).send({ message: "Tab page not found" });
+    }
+
+    await page.goto(newUrl);
+
+    // Update tab data with the new URL
+    tabData.url = newUrl;
+    await redis.set(browserId, JSON.stringify(browserData));
+
+    res.status(200).send({ message: "Navigation successful" });
+  } catch (error) {
+    console.error("Error navigating to URL:", error);
+    res.status(500).send({ message: "Failed to navigate to URL" });
   }
 });
 
