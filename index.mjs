@@ -293,11 +293,7 @@ async function closeAllBrowsers() {
       },
     });
     const result = await response.json();
-<<<<<<< HEAD
-    // console.log("Successfully called /close-all:", result); // Removed log
-=======
     logger.info("Successfully called /close-all:", result); // Removed log
->>>>>>> a5579d7 (🚀 To the moon.)
   } catch (error) {
     logger.error("Error calling /close-all:", error);
   }
@@ -561,11 +557,7 @@ async function launchBrowserWithRandomProxy() {
       }),
     });
     const data = await response.text();
-<<<<<<< HEAD
-    // console.log("Successfully called /launch-from-proxy:", data); // Removed log
-=======
     logger.info("Successfully called /launch-from-proxy:", data); // Removed log
->>>>>>> a5579d7 (🚀 To the moon.)
   } catch (error) {
     logger.error("Error calling /launch-from-proxy:", error);
   }
@@ -622,15 +614,6 @@ app.post("/search-city", async (req, res) => {
 
     // If page is still not found, log the available pages for debugging
     if (!page) {
-<<<<<<< HEAD
-      // console.log("Available pages:"); // Removed log
-      for (const p of pages) {
-        const session = await p.createCDPSession();
-        const info = await session.send("Target.getTargetInfo");
-        // console.log(
-        //   `Page URL: ${await p.url()}, Target ID: ${info.targetInfo.targetId}`
-        // ); // Removed log
-=======
       logger.info("Available pages:"); // Removed log
       for (const p of pages) {
         const session = await p.createCDPSession();
@@ -638,7 +621,6 @@ app.post("/search-city", async (req, res) => {
         logger.info(
           `Page URL: ${await p.url()}, Target ID: ${info.targetInfo.targetId}`
         ); // Removed log
->>>>>>> a5579d7 (🚀 To the moon.)
       }
       return res.status(404).send({ message: "Tab page not found" });
     }
@@ -835,11 +817,7 @@ app.post("/search-products", async (req, res) => {
       url += `&maxPrice=${maxPrice}`;
     }
 
-<<<<<<< HEAD
-    // console.log("URL being accessed:", url); // Removed log
-=======
     logger.info("URL being accessed:", url); // Removed log
->>>>>>> a5579d7 (🚀 To the moon.)
 
     await page.goto(url, { waitUntil: "domcontentloaded" });
 
@@ -850,11 +828,7 @@ app.post("/search-products", async (req, res) => {
       productLimit
     );
 
-<<<<<<< HEAD
-    // console.log("Product details extracted:", productDetails); // Removed log
-=======
     logger.info("Product details extracted:", productDetails); // Removed log
->>>>>>> a5579d7 (🚀 To the moon.)
 
     // Close the tab
     await page.close();
@@ -971,11 +945,7 @@ async function launchNewBrowser(proxyInfo) {
       }),
     });
     const result = await response.json();
-<<<<<<< HEAD
-    // console.log("New browser launched:", result); // Removed log
-=======
     logger.info("New browser launched:", result); // Removed log
->>>>>>> a5579d7 (🚀 To the moon.)
   } catch (error) {
     logger.error("Error launching new browser:", error);
   }
