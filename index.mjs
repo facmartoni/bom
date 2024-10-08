@@ -6,6 +6,7 @@ import client from "prom-client";
 import { Gauge } from "prom-client";
 import winston from "winston";
 import LokiTransport from "winston-loki";
+import os from "os";
 
 dotenv.config();
 
@@ -19,6 +20,7 @@ const logger = createLogger({
   defaultMeta: { service: "bom-microservice" },
   transports: [
     new transports.Console(),
+    new transports.File({ filename: "logs/bom-microservice.log" }), // Add this line for file logging
     new LokiTransport({
       host: "http://localhost:3100", // Replace with your Loki server address
       labels: { job: "bom-microservice" },
@@ -29,6 +31,10 @@ const logger = createLogger({
     }),
   ],
 });
+
+// Constants for Garbage Collector
+const MEMORY_THRESHOLD = 4 * 1024 * 1024 * 1024; // 4GB in bytes
+const MIN_BROWSERS = 3; // Minimum number of browsers to keep in the pool
 
 // Load proxies from environment variables
 const PROXIES = process.env.PROXIES
@@ -164,6 +170,7 @@ app.post("/launch", async (req, res) => {
         wsEndpoint,
         numberOfTabs: 0,
         tabs: [],
+        launchTime: new Date().toISOString(), // Add launch time
       };
 
       await redis.set(browserId, JSON.stringify(browserData));
@@ -505,7 +512,7 @@ app.post("/launch-from-proxy", async (req, res) => {
       })(),
     };
 
-    // Store the browser instance data in Redis, including WebSocket endpoint
+    // Store the browser instance data in Redis, including WebSocket endpoint and launch time
     const wsEndpoint = browser.wsEndpoint();
     const browserData = {
       id: browserId,
@@ -514,6 +521,7 @@ app.post("/launch-from-proxy", async (req, res) => {
       wsEndpoint,
       numberOfTabs: 1,
       tabs: [tabData],
+      launchTime: new Date().toISOString(), // Add launch time
     };
 
     await redis.set(browserId, JSON.stringify(browserData));
@@ -965,7 +973,10 @@ async function getProxiesInfo() {
 async function getAllBrowsers() {
   const response = await fetch(`http://localhost:${PORT}/browsers`);
   const data = await response.json();
-  return data.instances;
+  return data.instances.map((browser) => ({
+    ...browser,
+    launchTime: browser.launchTime || new Date().toISOString(), // Add a default launch time if not present
+  }));
 }
 
 // Add this function after the other helper functions
@@ -996,6 +1007,77 @@ async function updateRamUsage() {
 
 // Add this near the bottom of the file, just before the app.listen() call
 setInterval(updateRamUsage, 30000);
+
+// Function to get system memory usage
+function getSystemMemoryUsage() {
+  const totalMemory = os.totalmem();
+  const freeMemory = os.freemem();
+  return totalMemory - freeMemory;
+}
+
+// Garbage Collector function
+async function garbageCollectBrowsers() {
+  try {
+    const memoryUsage = getSystemMemoryUsage();
+    if (memoryUsage < MEMORY_THRESHOLD) {
+      logger.info("Memory usage below threshold. Skipping garbage collection.");
+      return;
+    }
+
+    const browsers = await getAllBrowsers();
+    if (browsers.length <= MIN_BROWSERS) {
+      logger.info(
+        `Only ${MIN_BROWSERS} browsers left. Skipping garbage collection.`
+      );
+      return;
+    }
+
+    // Sort browsers by age (oldest first)
+    browsers.sort((a, b) => new Date(a.launchTime) - new Date(b.launchTime));
+
+    let closedCount = 0;
+    for (const browser of browsers) {
+      if (browsers.length - closedCount <= MIN_BROWSERS) break;
+
+      if (browser.tabs.length === 2) {
+        const bareTabs = browser.tabs.filter(
+          (tab) => tab.state === "bare" || tab.url === "about:blank"
+        );
+        const citySearchReadyTabs = browser.tabs.filter(
+          (tab) => tab.state === "city_search_ready"
+        );
+
+        if (bareTabs.length === 1 && citySearchReadyTabs.length === 1) {
+          await closeBrowser(browser.id);
+          closedCount++;
+        }
+      }
+    }
+
+    logger.info(`Garbage collection complete. Closed ${closedCount} browsers.`);
+  } catch (error) {
+    logger.error("Error during garbage collection:", error);
+  }
+}
+
+// Function to close a specific browser
+async function closeBrowser(browserId) {
+  try {
+    const response = await fetch(
+      `http://localhost:${PORT}/close/${browserId}`,
+      {
+        method: "POST",
+      }
+    );
+    const result = await response.json();
+    logger.info(`Closed browser ${browserId}:`, result);
+  } catch (error) {
+    logger.error(`Error closing browser ${browserId}:`, error);
+  }
+}
+
+// Set up the interval to run garbage collection every 10 minutes
+setInterval(garbageCollectBrowsers, 10 * 60 * 1000);
 
 app.listen(PORT, (err) => {
   if (err) {
