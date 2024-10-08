@@ -3,8 +3,32 @@ import puppeteer from "puppeteer";
 import Redis from "ioredis";
 import dotenv from "dotenv";
 import client from "prom-client";
+import { Gauge } from "prom-client";
+import winston from "winston";
+import LokiTransport from "winston-loki";
 
 dotenv.config();
+
+// Add this near the top of the file, after other imports
+const { createLogger, format, transports } = winston;
+
+// Configure the logger
+const logger = createLogger({
+  level: "info",
+  format: format.combine(format.timestamp(), format.json()),
+  defaultMeta: { service: "bom-microservice" },
+  transports: [
+    new transports.Console(),
+    new LokiTransport({
+      host: "http://localhost:3100", // Replace with your Loki server address
+      labels: { job: "bom-microservice" },
+      json: true,
+      format: format.json(),
+      replaceTimestamp: true,
+      onConnectionError: (err) => logger.error(err),
+    }),
+  ],
+});
 
 // Load proxies from environment variables
 const PROXIES = process.env.PROXIES
@@ -44,6 +68,19 @@ client.collectDefaultMetrics();
 const browserGauge = new client.Gauge({
   name: "bom_active_browser_instances",
   help: "Number of active browser instances",
+});
+
+// Add this after other metric definitions
+const proxyBrowserGauge = new Gauge({
+  name: "bom_proxy_browser_count",
+  help: "Number of browsers opened for each proxy",
+  labelNames: ["proxy"],
+});
+
+// Add this near the top of the file, where other metrics are defined
+const ramUsageGauge = new client.Gauge({
+  name: "bom_total_ram_usage_gb",
+  help: "Total RAM usage of all browser instances and the microservice in GB",
 });
 
 // A metrics endpoint for Prometheus to scrape
@@ -111,6 +148,11 @@ app.post("/launch", async (req, res) => {
       browserInstances++; // Increment after retrieval to avoid duplicating IDs
       const proxyCountKey = `proxy_count_${selectedProxy.ip}:${selectedProxy.port}`;
       await redis.incr(proxyCountKey);
+      const updatedBrowserCount = parseInt(await redis.get(proxyCountKey)) || 0;
+      proxyBrowserGauge.set(
+        { proxy: `${selectedProxy.ip}:${selectedProxy.port}` },
+        updatedBrowserCount
+      );
       const browserId = `browser_${browserInstances}`;
 
       // Store the browser instance data in Redis, including WebSocket endpoint
@@ -128,6 +170,9 @@ app.post("/launch", async (req, res) => {
 
       browserGauge.inc();
 
+      // In the /launch endpoint, add this line just before sending the response:
+      await updateRamUsage();
+
       res.status(200).send({
         browserId,
         proxy: { ip: selectedProxy.ip, port: selectedProxy.port },
@@ -135,7 +180,7 @@ app.post("/launch", async (req, res) => {
       });
       return;
     } catch (error) {
-      console.error("Error launching browser with proxy:", error);
+      logger.error("Error launching browser with proxy:", error);
       retryCount++;
       if (browser) {
         await browser.close();
@@ -162,7 +207,7 @@ app.get("/browsers", async (req, res) => {
     }
     res.status(200).send({ instances });
   } catch (error) {
-    console.error("Error retrieving all browser instances:", error);
+    logger.error("Error retrieving all browser instances:", error);
     res
       .status(500)
       .send({ message: "Failed to retrieve all browser instances" });
@@ -181,11 +226,19 @@ app.post("/close/:id", async (req, res) => {
     await redis.del(browserId);
     const proxyCountKey = `proxy_count_${browserData.proxy.ip}:${browserData.proxy.port}`;
     await redis.decr(proxyCountKey);
+    const updatedBrowserCount = parseInt(await redis.get(proxyCountKey)) || 0;
+    proxyBrowserGauge.set(
+      { proxy: `${browserData.proxy.ip}:${browserData.proxy.port}` },
+      updatedBrowserCount
+    );
     browserGauge.dec(); // Decrease active browser count
+
+    // In the /close/:id endpoint, add this line just before sending the response:
+    await updateRamUsage();
 
     res.status(200).send({ message: "Browser instance closed successfully" });
   } catch (error) {
-    console.error("Error closing browser:", error);
+    logger.error("Error closing browser:", error);
     res.status(500).send({ message: "Failed to close browser instance" });
   }
 });
@@ -202,7 +255,7 @@ app.post("/close-all", async (req, res) => {
           process.kill(browserData.pid);
         } catch (err) {
           if (err.code !== "ESRCH") {
-            console.error(`Error trying to kill PID ${browserData.pid}:`, err);
+            logger.error(`Error trying to kill PID ${browserData.pid}:`, err);
           }
         }
       }
@@ -216,13 +269,17 @@ app.post("/close-all", async (req, res) => {
     for (const proxy of PROXIES) {
       const proxyCountKey = `proxy_count_${proxy.ip}:${proxy.port}`;
       await redis.set(proxyCountKey, 0);
+      proxyBrowserGauge.set({ proxy: `${proxy.ip}:${proxy.port}` }, 0);
     }
+
+    // In the /close-all endpoint, add this line just before sending the response:
+    await updateRamUsage();
 
     res
       .status(200)
       .send({ message: "All browser instances closed successfully" });
   } catch (error) {
-    console.error("Error closing all browsers:", error);
+    logger.error("Error closing all browsers:", error);
     res.status(500).send({ message: "Failed to close all browser instances" });
   }
 });
@@ -236,9 +293,13 @@ async function closeAllBrowsers() {
       },
     });
     const result = await response.json();
+<<<<<<< HEAD
     // console.log("Successfully called /close-all:", result); // Removed log
+=======
+    logger.info("Successfully called /close-all:", result); // Removed log
+>>>>>>> a5579d7 (🚀 To the moon.)
   } catch (error) {
-    console.error("Error calling /close-all:", error);
+    logger.error("Error calling /close-all:", error);
   }
 }
 
@@ -249,14 +310,18 @@ app.get("/proxies", async (req, res) => {
     for (const proxy of PROXIES) {
       const proxyCountKey = `proxy_count_${proxy.ip}:${proxy.port}`;
       const browserCount = parseInt(await redis.get(proxyCountKey)) || 0;
+      const proxyString = `${proxy.ip}:${proxy.port}`;
       proxiesInfo.push({
-        proxy: `${proxy.ip}:${proxy.port}`,
+        proxy: proxyString,
         browserCount,
       });
+
+      // Update the Prometheus metric
+      proxyBrowserGauge.set({ proxy: proxyString }, browserCount);
     }
     res.status(200).send({ proxies: proxiesInfo });
   } catch (error) {
-    console.error("Error retrieving proxy information:", error);
+    logger.error("Error retrieving proxy information:", error);
     res.status(500).send({ message: "Failed to retrieve proxy information" });
   }
 });
@@ -298,7 +363,7 @@ app.post("/browser/:id/tab", async (req, res) => {
 
     res.status(200).send({ tabId, message: "Tab opened successfully" });
   } catch (error) {
-    console.error("Error opening new tab:", error);
+    logger.error("Error opening new tab:", error);
     res.status(500).send({ message: "Failed to open new tab" });
   }
 });
@@ -334,7 +399,7 @@ app.post("/browser/:browserId/tab/:tabId/navigate", async (req, res) => {
     let page = pages.find((p) => p.url() === tabData.url);
 
     if (!page) {
-      console.log("Tab not found by URL. Checking by target ID...");
+      logger.info("Tab not found by URL. Checking by target ID...");
       for (const p of pages) {
         const session = await p.createCDPSession();
         const info = await session.send("Target.getTargetInfo");
@@ -358,7 +423,7 @@ app.post("/browser/:browserId/tab/:tabId/navigate", async (req, res) => {
 
     res.status(200).send({ message: "Navigation successful" });
   } catch (error) {
-    console.error("Error navigating to URL:", error);
+    logger.error("Error navigating to URL:", error);
     res.status(500).send({ message: "Failed to navigate to URL" });
   }
 });
@@ -378,7 +443,7 @@ async function prepareTabForCitySearch(page, browserData, tabData) {
   if ((await page.$(allowCookiesSelector)) !== null) {
     await page.click(allowCookiesSelector);
   } else {
-    console.log("No cookie consent popup found.");
+    logger.info("No cookie consent popup found.");
   }
 
   // Handle Login Modal
@@ -388,7 +453,7 @@ async function prepareTabForCitySearch(page, browserData, tabData) {
     });
     await page.click('div[role="button"][aria-label="Close"]');
   } catch (error) {
-    console.log("No login modal found.");
+    logger.info("No login modal found.");
   }
 
   await page.waitForSelector("#seo_filters", { timeout: 5000 });
@@ -468,7 +533,7 @@ app.post("/launch-from-proxy", async (req, res) => {
       message: "Browser launched and City Search Tab opened successfully",
     });
   } catch (error) {
-    console.error("Error launching browser with provided proxy:", error);
+    logger.error("Error launching browser with provided proxy:", error);
     res
       .status(500)
       .send({ message: "Failed to launch browser with provided proxy" });
@@ -496,9 +561,13 @@ async function launchBrowserWithRandomProxy() {
       }),
     });
     const data = await response.text();
+<<<<<<< HEAD
     // console.log("Successfully called /launch-from-proxy:", data); // Removed log
+=======
+    logger.info("Successfully called /launch-from-proxy:", data); // Removed log
+>>>>>>> a5579d7 (🚀 To the moon.)
   } catch (error) {
-    console.error("Error calling /launch-from-proxy:", error);
+    logger.error("Error calling /launch-from-proxy:", error);
   }
 }
 
@@ -553,6 +622,7 @@ app.post("/search-city", async (req, res) => {
 
     // If page is still not found, log the available pages for debugging
     if (!page) {
+<<<<<<< HEAD
       // console.log("Available pages:"); // Removed log
       for (const p of pages) {
         const session = await p.createCDPSession();
@@ -560,6 +630,15 @@ app.post("/search-city", async (req, res) => {
         // console.log(
         //   `Page URL: ${await p.url()}, Target ID: ${info.targetInfo.targetId}`
         // ); // Removed log
+=======
+      logger.info("Available pages:"); // Removed log
+      for (const p of pages) {
+        const session = await p.createCDPSession();
+        const info = await session.send("Target.getTargetInfo");
+        logger.info(
+          `Page URL: ${await p.url()}, Target ID: ${info.targetInfo.targetId}`
+        ); // Removed log
+>>>>>>> a5579d7 (🚀 To the moon.)
       }
       return res.status(404).send({ message: "Tab page not found" });
     }
@@ -644,7 +723,7 @@ app.post("/search-city", async (req, res) => {
       }
     }
   } catch (error) {
-    console.error("Error searching city:", error);
+    logger.error("Error searching city:", error);
     res.status(500).send({ message: "Failed to search city" });
   }
 });
@@ -756,7 +835,11 @@ app.post("/search-products", async (req, res) => {
       url += `&maxPrice=${maxPrice}`;
     }
 
+<<<<<<< HEAD
     // console.log("URL being accessed:", url); // Removed log
+=======
+    logger.info("URL being accessed:", url); // Removed log
+>>>>>>> a5579d7 (🚀 To the moon.)
 
     await page.goto(url, { waitUntil: "domcontentloaded" });
 
@@ -767,10 +850,16 @@ app.post("/search-products", async (req, res) => {
       productLimit
     );
 
+<<<<<<< HEAD
     // console.log("Product details extracted:", productDetails); // Removed log
+=======
+    logger.info("Product details extracted:", productDetails); // Removed log
+>>>>>>> a5579d7 (🚀 To the moon.)
 
     // Close the tab
     await page.close();
+
+    await updateRamUsage();
 
     // Send the response with both product details and newBrowserLaunched flag
     res.status(200).send({
@@ -778,7 +867,7 @@ app.post("/search-products", async (req, res) => {
       newBrowserLaunched: newBrowserLaunched,
     });
   } catch (error) {
-    console.error("Error searching products:", error);
+    logger.error("Error searching products:", error);
     res
       .status(500)
       .send({ message: "Failed to search products", error: error.message });
@@ -799,7 +888,7 @@ async function extractProductDetails(page, FREE_WORDS, PRODUCT_LIMIT) {
         ).slice(0, PRODUCT_LIMIT);
 
         if (products.length === 0) {
-          console.warn("There are no products!");
+          logger.warn("There are no products!");
           return [];
         }
 
@@ -863,7 +952,7 @@ async function extractProductDetails(page, FREE_WORDS, PRODUCT_LIMIT) {
 
     return productDetails;
   } catch (error) {
-    console.error("Error extracting product details:", error.message);
+    logger.error("Error extracting product details:", error.message);
     return [];
   }
 }
@@ -882,9 +971,13 @@ async function launchNewBrowser(proxyInfo) {
       }),
     });
     const result = await response.json();
+<<<<<<< HEAD
     // console.log("New browser launched:", result); // Removed log
+=======
+    logger.info("New browser launched:", result); // Removed log
+>>>>>>> a5579d7 (🚀 To the moon.)
   } catch (error) {
-    console.error("Error launching new browser:", error);
+    logger.error("Error launching new browser:", error);
   }
 }
 
@@ -905,12 +998,41 @@ async function getAllBrowsers() {
   return data.instances;
 }
 
+// Add this function after the other helper functions
+async function updateRamUsage() {
+  try {
+    const browsers = await getAllBrowsers();
+    let totalRamUsage = 0;
+
+    for (const browser of browsers) {
+      if (browser.pid) {
+        const usage = process.memoryUsage.rss(browser.pid);
+        totalRamUsage += usage;
+      }
+    }
+
+    // Add the RAM usage of the current process (the microservice itself)
+    totalRamUsage += process.memoryUsage().rss;
+
+    // Convert to GB
+    const totalRamUsageGB = totalRamUsage / (1024 * 1024 * 1024);
+
+    // Update the gauge
+    ramUsageGauge.set(totalRamUsageGB);
+  } catch (error) {
+    logger.error("Error updating RAM usage:", error);
+  }
+}
+
+// Add this near the bottom of the file, just before the app.listen() call
+setInterval(updateRamUsage, 30000);
+
 app.listen(PORT, (err) => {
   if (err) {
-    console.error(`Error starting server on port ${PORT}:`, err);
+    logger.error(`Error starting server on port ${PORT}:`, err);
     process.exit(1);
   } else {
-    console.log(`BOM running on port ${PORT}`);
+    logger.info(`BOM running on port ${PORT}`);
     closeAllBrowsers();
     launchBrowserWithRandomProxy();
   }
