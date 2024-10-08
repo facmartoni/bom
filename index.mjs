@@ -236,7 +236,7 @@ async function closeAllBrowsers() {
       },
     });
     const result = await response.json();
-    console.log("Successfully called /close-all:", result);
+    // console.log("Successfully called /close-all:", result); // Removed log
   } catch (error) {
     console.error("Error calling /close-all:", error);
   }
@@ -364,8 +364,13 @@ app.post("/browser/:browserId/tab/:tabId/navigate", async (req, res) => {
 });
 
 // Define the function to transform a tab into a ready-to-search city tab
-async function prepareTabForCitySearch(page) {
+async function prepareTabForCitySearch(page, browserData, tabData) {
   const url = process.env.MARKETPLACE_URL;
+
+  // Update tab state to "pending"
+  tabData.state = "pending";
+  await redis.set(browserData.id, JSON.stringify(browserData));
+
   await page.goto(url, { waitUntil: "domcontentloaded" });
 
   // Handle Cookies Modal
@@ -396,6 +401,11 @@ async function prepareTabForCitySearch(page) {
   await page.evaluate((selector) => {
     document.querySelector(selector).value = "";
   }, inputSelector);
+
+  // Update tab state to "city_search_ready" and set the correct URL
+  tabData.state = "city_search_ready";
+  tabData.url = page.url();
+  await redis.set(browserData.id, JSON.stringify(browserData));
 }
 
 // Launch a new browser instance from a given proxy
@@ -431,7 +441,7 @@ app.post("/launch-from-proxy", async (req, res) => {
         const session = await page.createCDPSession();
         const info = await session.send("Target.getTargetInfo");
         return info.targetInfo.targetId;
-      })(), // Store target ID for unique identification
+      })(),
     };
 
     // Store the browser instance data in Redis, including WebSocket endpoint
@@ -450,11 +460,7 @@ app.post("/launch-from-proxy", async (req, res) => {
     browserGauge.inc();
 
     // Call the function to prepare the tab for city search
-    await prepareTabForCitySearch(page);
-
-    // Update tab state to "completed"
-    tabData.state = "city_search_ready";
-    await redis.set(browserId, JSON.stringify(browserData));
+    await prepareTabForCitySearch(page, browserData, tabData);
 
     res.status(200).send({
       browserId,
@@ -490,7 +496,7 @@ async function launchBrowserWithRandomProxy() {
       }),
     });
     const data = await response.text();
-    console.log("Successfully called /launch-from-proxy:", data);
+    // console.log("Successfully called /launch-from-proxy:", data); // Removed log
   } catch (error) {
     console.error("Error calling /launch-from-proxy:", error);
   }
@@ -547,13 +553,13 @@ app.post("/search-city", async (req, res) => {
 
     // If page is still not found, log the available pages for debugging
     if (!page) {
-      console.log("Available pages:");
+      // console.log("Available pages:"); // Removed log
       for (const p of pages) {
         const session = await p.createCDPSession();
         const info = await session.send("Target.getTargetInfo");
-        console.log(
-          `Page URL: ${await p.url()}, Target ID: ${info.targetInfo.targetId}`
-        );
+        // console.log(
+        //   `Page URL: ${await p.url()}, Target ID: ${info.targetInfo.targetId}`
+        // ); // Removed log
       }
       return res.status(404).send({ message: "Tab page not found" });
     }
@@ -602,19 +608,20 @@ app.post("/search-city", async (req, res) => {
         res.status(200).send({ data: jsonData });
       } finally {
         const newTab = await browser.newPage();
-        await prepareTabForCitySearch(newTab); // Use the prepareTabForCitySearch function
-
-        // Update browser data in Redis with the new tab information
-        browserData.tabs.push({
+        const newTabData = {
           targetId: await (async () => {
             const session = await newTab.createCDPSession();
             const info = await session.send("Target.getTargetInfo");
             return info.targetInfo.targetId;
           })(),
-          url: newTab.url(),
-          state: "city_search_ready",
-        });
+          url: "about:blank",
+          state: "pending",
+        };
+
+        browserData.tabs.push(newTabData);
         await redis.set(browserData.id, JSON.stringify(browserData));
+
+        await prepareTabForCitySearch(newTab, browserData, newTabData);
       }
     } else {
       // Extract values from each li element
@@ -749,7 +756,7 @@ app.post("/search-products", async (req, res) => {
       url += `&maxPrice=${maxPrice}`;
     }
 
-    console.log("URL being accessed:", url);
+    // console.log("URL being accessed:", url); // Removed log
 
     await page.goto(url, { waitUntil: "domcontentloaded" });
 
@@ -760,7 +767,7 @@ app.post("/search-products", async (req, res) => {
       productLimit
     );
 
-    console.log("Product details extracted:", productDetails);
+    // console.log("Product details extracted:", productDetails); // Removed log
 
     // Close the tab
     await page.close();
@@ -875,7 +882,7 @@ async function launchNewBrowser(proxyInfo) {
       }),
     });
     const result = await response.json();
-    console.log("New browser launched:", result);
+    // console.log("New browser launched:", result); // Removed log
   } catch (error) {
     console.error("Error launching new browser:", error);
   }
