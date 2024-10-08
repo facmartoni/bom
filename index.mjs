@@ -14,6 +14,22 @@ const PROXIES = process.env.PROXIES
     })
   : [];
 
+const FREE_WORDS = [
+  "Free",
+  "Gratis",
+  "Gratuit",
+  "Livre",
+  "免费",
+  "無料",
+  "무료",
+  "Frei",
+  "Свободный",
+  "Libero",
+  "Besplatno",
+  "Бесплатно",
+  "Grátis",
+];
+
 const app = express();
 const redis = new Redis(process.env.REDIS_URL);
 const PORT = process.env.PORT || 3000;
@@ -650,6 +666,236 @@ async function clearAndType(page, selector, value) {
     selector,
     value
   );
+}
+
+// Add this new endpoint
+app.post("/search-products", async (req, res) => {
+  const {
+    city,
+    searchTerm,
+    minPrice,
+    maxPrice,
+    productLimit = 9,
+    daysSinceListed = 7,
+  } = req.body;
+
+  if (!city || !searchTerm) {
+    return res
+      .status(400)
+      .send({ message: "City and search term are required" });
+  }
+
+  try {
+    // Check for available proxies
+    const proxiesInfo = await getProxiesInfo();
+    let selectedBrowser = null;
+    let newBrowserLaunched = false;
+
+    // Choose the browser with the least tabs
+    const browsers = await getAllBrowsers();
+    selectedBrowser = browsers.reduce((min, browser) =>
+      browser.numberOfTabs < min.numberOfTabs ? browser : min
+    );
+
+    // If there's a proxy with 0 browsers, launch a new browser in the background
+    if (proxiesInfo.some((proxy) => proxy.browserCount === 0)) {
+      const availableProxies = proxiesInfo.filter(
+        (proxy) => proxy.browserCount === 0
+      );
+      const randomProxy =
+        availableProxies[Math.floor(Math.random() * availableProxies.length)];
+
+      // Launch new browser asynchronously
+      launchNewBrowser(randomProxy);
+      newBrowserLaunched = true;
+    }
+
+    // Create a new tab in the selected browser
+    const response = await fetch(
+      `http://localhost:${PORT}/browser/${selectedBrowser.id}/tab`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: "about:blank" }),
+      }
+    );
+    const { tabId } = await response.json();
+
+    // Reconnect to the browser and get the page
+    const browser = await puppeteer.connect({
+      browserWSEndpoint: selectedBrowser.wsEndpoint,
+    });
+    const pages = await browser.pages();
+    const page = pages.find((p) => p.url() === "about:blank");
+
+    if (!page) {
+      throw new Error("Unable to find the newly created tab");
+    }
+
+    // Prepare the search URL
+    const searchTermEncoded = encodeURIComponent(searchTerm.trim());
+    const cityEncoded = encodeURIComponent(city.trim());
+    const daysSinceListedEncoded = encodeURIComponent(
+      daysSinceListed.toString()
+    );
+
+    let url = `https://www.facebook.com/marketplace/${cityEncoded}/search?daysSinceListed=${daysSinceListedEncoded}&query=${searchTermEncoded}&exact=false`;
+
+    if (minPrice && maxPrice) {
+      url += `&minPrice=${minPrice}&maxPrice=${maxPrice}`;
+    } else if (minPrice) {
+      url += `&minPrice=${minPrice}`;
+    } else if (maxPrice) {
+      url += `&maxPrice=${maxPrice}`;
+    }
+
+    console.log("URL being accessed:", url);
+
+    await page.goto(url, { waitUntil: "domcontentloaded" });
+
+    // Extract product details
+    const productDetails = await extractProductDetails(
+      page,
+      FREE_WORDS,
+      productLimit
+    );
+
+    console.log("Product details extracted:", productDetails);
+
+    // Close the tab
+    await page.close();
+
+    // Send the response with both product details and newBrowserLaunched flag
+    res.status(200).send({
+      data: productDetails,
+      newBrowserLaunched: newBrowserLaunched,
+    });
+  } catch (error) {
+    console.error("Error searching products:", error);
+    res
+      .status(500)
+      .send({ message: "Failed to search products", error: error.message });
+  }
+});
+
+// Helper function to extract product details
+async function extractProductDetails(page, FREE_WORDS, PRODUCT_LIMIT) {
+  try {
+    await page.waitForSelector('a[href*="/marketplace/item/"]', {
+      timeout: 10000,
+    });
+
+    const productDetails = await page.evaluate(
+      (FREE_WORDS, PRODUCT_LIMIT) => {
+        const products = Array.from(
+          document.querySelectorAll('a[href*="/marketplace/item/"]')
+        ).slice(0, PRODUCT_LIMIT);
+
+        if (products.length === 0) {
+          console.warn("There are no products!");
+          return [];
+        }
+
+        return products.map((product) => {
+          // Product Cover Image URL
+          const imgElement = product.querySelector("img");
+          const imgUrl = imgElement ? imgElement.src : null;
+
+          // Price, Title and City
+          const spans = product.querySelectorAll('span[dir="auto"]');
+
+          let price = null;
+          let title = null;
+          let city = null;
+
+          for (const span of spans) {
+            const text = span.textContent.trim();
+
+            if (!price) {
+              const pricePattern = /^([^\d]*)([\d\s.,]+)([^\d]*)$/;
+              const isPrice = pricePattern.test(text);
+
+              const isFree = FREE_WORDS.some(
+                (word) => text.toLowerCase() === word.toLowerCase()
+              );
+
+              if (isPrice || isFree) {
+                price = text;
+                continue;
+              }
+            }
+
+            if (price && !title && spans[spans.length - 1].textContent.trim()) {
+              if (price && title && !city) {
+                city = text;
+                continue;
+              }
+              title = text;
+              continue;
+            }
+
+            if (price && !city) {
+              city = text;
+              break;
+            }
+          }
+
+          // Product ID
+          const href = product.getAttribute("href");
+          const idMatch = href
+            ? href.match(/\/marketplace\/item\/(\d+)/)
+            : null;
+          const id = idMatch ? idMatch[1] : null;
+
+          return { imgUrl, title, price, city, id };
+        });
+      },
+      FREE_WORDS,
+      PRODUCT_LIMIT
+    );
+
+    return productDetails;
+  } catch (error) {
+    console.error("Error extracting product details:", error.message);
+    return [];
+  }
+}
+
+// Helper function to launch a new browser asynchronously
+async function launchNewBrowser(proxyInfo) {
+  try {
+    const response = await fetch(`http://localhost:${PORT}/launch-from-proxy`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        proxy: {
+          ip: proxyInfo.proxy.split(":")[0],
+          port: proxyInfo.proxy.split(":")[1],
+        },
+      }),
+    });
+    const result = await response.json();
+    console.log("New browser launched:", result);
+  } catch (error) {
+    console.error("Error launching new browser:", error);
+  }
+}
+
+// Helper function to get proxies info
+async function getProxiesInfo() {
+  const response = await fetch(`http://localhost:${PORT}/proxies`);
+  const data = await response.json();
+  return data.proxies.map((proxy) => ({
+    proxy: `${proxy.proxy}`,
+    browserCount: proxy.browserCount,
+  }));
+}
+
+// Helper function to get all browsers
+async function getAllBrowsers() {
+  const response = await fetch(`http://localhost:${PORT}/browsers`);
+  const data = await response.json();
+  return data.instances;
 }
 
 app.listen(PORT, (err) => {
