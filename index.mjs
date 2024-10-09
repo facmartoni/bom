@@ -7,6 +7,7 @@ import { Gauge } from "prom-client";
 import winston from "winston";
 import LokiTransport from "winston-loki";
 import os from "os";
+import cors from "cors";
 
 dotenv.config();
 
@@ -61,6 +62,16 @@ const FREE_WORDS = [
 ];
 
 const app = express();
+
+// Add this line after creating the Express app
+app.use(
+  cors({
+    origin: "http://localhost:3000",
+    methods: ["GET", "POST"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
+
 const redis = new Redis(process.env.REDIS_URL);
 const PORT = process.env.PORT || 3000;
 const HEADLESS = process.env.HEADLESS === "false" ? false : true;
