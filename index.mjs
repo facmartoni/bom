@@ -725,7 +725,9 @@ app.post("/search-city", async (req, res) => {
     }
   } catch (error) {
     logger.error("Error searching city:", error);
-    res.status(500).send({ message: "Failed to search city" });
+    if (!res.headersSent) {
+      res.status(500).send({ message: "HEADERS_SENT" });
+    }
   }
 });
 
