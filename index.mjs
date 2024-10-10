@@ -613,33 +613,43 @@ app.post("/search-city", async (req, res) => {
 
     const { browserData, readyTab } = selectedBrowser;
 
-    // Reconnect to the existing browser using the WebSocket endpoint
+    // Reconnect to the existing browser using the WebSocket endpoint with increased timeout
     const browser = await puppeteer.connect({
       browserWSEndpoint: browserData.wsEndpoint,
       defaultViewport: { width: 1280, height: 800 },
+      protocolTimeout: 60000, // Increase timeout to 60 seconds
     });
+
     const pages = await browser.pages();
     let page = null;
 
     // Check for the page using the targetId directly
     for (const p of pages) {
-      const session = await p.createCDPSession();
-      const info = await session.send("Target.getTargetInfo");
-      if (info.targetInfo.targetId === readyTab.targetId) {
-        page = p;
-        break;
+      try {
+        const session = await p.createCDPSession();
+        const info = await session.send("Target.getTargetInfo");
+        if (info.targetInfo.targetId === readyTab.targetId) {
+          page = p;
+          break;
+        }
+      } catch (error) {
+        logger.error("Error checking page target:", error);
       }
     }
 
     // If page is still not found, log the available pages for debugging
     if (!page) {
-      logger.info("Available pages:"); // Removed log
+      logger.info("Available pages:");
       for (const p of pages) {
-        const session = await p.createCDPSession();
-        const info = await session.send("Target.getTargetInfo");
-        logger.info(
-          `Page URL: ${await p.url()}, Target ID: ${info.targetInfo.targetId}`
-        ); // Removed log
+        try {
+          const session = await p.createCDPSession();
+          const info = await session.send("Target.getTargetInfo");
+          logger.info(
+            `Page URL: ${await p.url()}, Target ID: ${info.targetInfo.targetId}`
+          );
+        } catch (error) {
+          logger.error("Error logging page info:", error);
+        }
       }
       return res.status(404).send({ message: "Tab page not found" });
     }
@@ -726,7 +736,9 @@ app.post("/search-city", async (req, res) => {
   } catch (error) {
     logger.error("Error searching city:", error);
     if (!res.headersSent) {
-      res.status(500).send({ message: "HEADERS_SENT" });
+      res
+        .status(500)
+        .send({ message: "Error searching city", error: error.message });
     }
   }
 });
