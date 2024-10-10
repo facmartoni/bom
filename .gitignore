@@ -3,3 +3,8 @@ node_modules/
 dump.rdb
 data/
 logs/
+*.log
+*.lock
+*.tmp
+.DS_Store
+Thumbs.db
