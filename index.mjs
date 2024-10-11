@@ -450,14 +450,22 @@ async function prepareTabForCitySearch(page, browserData, tabData) {
   tabData.state = "pending";
   await redis.set(browserData.id, JSON.stringify(browserData));
 
-  await page.goto(url, { waitUntil: "domcontentloaded" });
+  try {
+    await page.goto(url, { waitUntil: "domcontentloaded" });
+  } catch (error) {
+    logger.error("Error navigating to marketplace URL:", error);
+    throw error;
+  }
 
   // Handle Cookies Modal
   const allowCookiesSelector = 'div[aria-label="Allow all cookies"]';
-  if ((await page.$(allowCookiesSelector)) !== null) {
-    await page.click(allowCookiesSelector);
-  } else {
-    logger.info("No cookie consent popup found.");
+  try {
+    if ((await page.$(allowCookiesSelector)) !== null) {
+      await page.waitForSelector(allowCookiesSelector, { timeout: 5000 });
+      await page.click(allowCookiesSelector);
+    }
+  } catch (error) {
+    logger.info("No cookie consent popup found or error handling it:", error);
   }
 
   // Handle Login Modal
@@ -467,19 +475,29 @@ async function prepareTabForCitySearch(page, browserData, tabData) {
     });
     await page.click('div[role="button"][aria-label="Close"]');
   } catch (error) {
-    logger.info("No login modal found.");
+    logger.info("No login modal found or error closing it:", error);
   }
 
-  await page.waitForSelector("#seo_filters", { timeout: 5000 });
-  await page.click("#seo_filters");
+  try {
+    await page.waitForSelector("#seo_filters", { timeout: 5000 });
+    await page.click("#seo_filters");
+  } catch (error) {
+    logger.error("Error clicking seo_filters:", error);
+    throw error;
+  }
 
   const inputSelector = 'input[aria-label="Location"]';
-  await page.waitForSelector(inputSelector, { timeout: 5000 });
-  await page.focus(inputSelector);
-  await new Promise((r) => setTimeout(r, 200)); // Adding a small delay for stability
-  await page.evaluate((selector) => {
-    document.querySelector(selector).value = "";
-  }, inputSelector);
+  try {
+    await page.waitForSelector(inputSelector, { timeout: 5000 });
+    await page.focus(inputSelector);
+    await new Promise((r) => setTimeout(r, 200)); // Adding a small delay for stability
+    await page.evaluate((selector) => {
+      document.querySelector(selector).value = "";
+    }, inputSelector);
+  } catch (error) {
+    logger.error("Error interacting with location input:", error);
+    throw error;
+  }
 
   // Update tab state to "city_search_ready" and set the correct URL
   tabData.state = "city_search_ready";
@@ -617,7 +635,7 @@ app.post("/search-city", async (req, res) => {
     const browser = await puppeteer.connect({
       browserWSEndpoint: browserData.wsEndpoint,
       defaultViewport: { width: 1280, height: 800 },
-      protocolTimeout: 60000, // Increase timeout to 60 seconds
+      protocolTimeout: 5000, // Increase timeout to 60 seconds
     });
 
     const pages = await browser.pages();
