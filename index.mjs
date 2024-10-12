@@ -611,15 +611,26 @@ app.post("/search-city", async (req, res) => {
     const keys = await redis.keys("browser_*");
     let selectedBrowser = null;
     let minTabsCount = Infinity;
+    const findReadyTab = async () => {
+      for (const key of keys) {
+        const browserData = JSON.parse(await redis.get(key));
+        const readyTab = browserData.tabs.find(
+          (tab) => tab.state === "city_search_ready"
+        );
+        if (readyTab && browserData.numberOfTabs < minTabsCount) {
+          return { browserData, readyTab };
+        }
+      }
+      return null;
+    };
 
-    for (const key of keys) {
-      const browserData = JSON.parse(await redis.get(key));
-      const readyTab = browserData.tabs.find(
-        (tab) => tab.state === "city_search_ready"
-      );
-      if (readyTab && browserData.numberOfTabs < minTabsCount) {
-        selectedBrowser = { browserData, readyTab };
-        minTabsCount = browserData.numberOfTabs;
+    let attempts = 0;
+    while (!selectedBrowser && attempts < 10) {
+      selectedBrowser = await findReadyTab();
+      if (!selectedBrowser) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        console.log("Waiting for a ready tab...");
+        attempts++;
       }
     }
 
@@ -762,29 +773,35 @@ app.post("/search-city", async (req, res) => {
 });
 
 async function clearAndType(page, selector, value) {
-  await page.evaluate((selector) => {
-    const inputElement = document.querySelector(selector);
-    inputElement.value = ""; // Clear the input value
-    inputElement.dispatchEvent(new Event("input", { bubbles: true })); // Trigger input event
-    inputElement.dispatchEvent(new Event("change", { bubbles: true })); // Trigger change event
-  }, selector);
-  await page.keyboard.press("End"); // Move cursor to the end
-  await page.keyboard.down("Control");
-  await page.keyboard.press("A"); // Select all text
-  await page.keyboard.up("Control");
-  await page.keyboard.press("Backspace"); // Delete selected text
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  await page.type(selector, value, { delay: 50 }); // Type with a slight delay between keystrokes
-  await page.evaluate(
-    (selector, value) => {
-      const inputElement = document.querySelector(selector);
-      inputElement.value = value; // Ensure the value is set
-      inputElement.dispatchEvent(new Event("input", { bubbles: true }));
-      inputElement.dispatchEvent(new Event("change", { bubbles: true }));
-    },
-    selector,
-    value
-  );
+  const maxAttempts = 3;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      await page.evaluate((selector) => {
+        const inputElement = document.querySelector(selector);
+        inputElement.value = "";
+        inputElement.dispatchEvent(new Event("input", { bubbles: true }));
+        inputElement.dispatchEvent(new Event("change", { bubbles: true }));
+      }, selector);
+
+      await page.focus(selector);
+      await page.keyboard.down("Control");
+      await page.keyboard.press("A");
+      await page.keyboard.up("Control");
+      await page.keyboard.press("Backspace");
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      await page.type(selector, value, { delay: 50 });
+
+      const inputValue = await page.$eval(selector, (el) => el.value);
+      if (inputValue === value) {
+        return; // Success, exit the function
+      }
+    } catch (error) {
+      console.error(`Attempt ${attempt + 1} failed:`, error);
+      if (attempt === maxAttempts - 1) throw error;
+    }
+  }
 }
 
 // Add this new endpoint
