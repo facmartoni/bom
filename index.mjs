@@ -74,7 +74,15 @@ app.use(
 
 const redis = new Redis(process.env.REDIS_URL);
 const PORT = process.env.PORT || 3000;
-const HEADLESS = process.env.HEADLESS === "false" ? false : true;
+// Remove the HEADLESS variable
+// const HEADLESS = process.env.HEADLESS === "false" ? false : true;
+
+// Add this line to check for DEBUG mode
+const DEBUG_MODE = process.env.DEBUG === "true";
+
+// Add this line to get the DEBUG_DELAY value
+const DEBUG_DELAY = parseInt(process.env.DEBUG_DELAY) || 0;
+
 app.use(express.json());
 
 let browserInstances = 0;
@@ -156,10 +164,12 @@ app.post("/launch", async (req, res) => {
 
       // Launch a new browser instance with the selected proxy and authentication
       browser = await puppeteer.launch({
-        headless: HEADLESS,
+        headless: DEBUG_MODE ? false : true, // Set headless based on DEBUG
         args: [
           `--proxy-server=http://${selectedProxy.ip}:${selectedProxy.port}`,
         ],
+        // Use DEBUG_DELAY for the slowMo option
+        slowMo: DEBUG_MODE ? DEBUG_DELAY : 0, // Use DEBUG_DELAY if DEBUG is true
       });
 
       browserInstances++; // Increment after retrieval to avoid duplicating IDs
@@ -515,9 +525,10 @@ app.post("/launch-from-proxy", async (req, res) => {
   try {
     // Launch a new browser instance with the provided proxy
     const browser = await puppeteer.launch({
-      headless: HEADLESS,
+      headless: DEBUG_MODE ? false : true, // Set headless based on DEBUG
       args: [`--proxy-server=http://${proxy.ip}:${proxy.port}`],
       defaultViewport: { width: 1280, height: 800 },
+      slowMo: DEBUG_MODE ? DEBUG_DELAY : 0, // Use DEBUG_DELAY if DEBUG is true
       userAgent:
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36",
     });
@@ -600,179 +611,84 @@ async function launchBrowserWithRandomProxy() {
   }
 }
 
-// Endpoint to search for a city in the available tabs
-app.post("/search-city", async (req, res) => {
-  const { city, sure } = req.body;
-  if (!city) {
-    return res.status(400).send({ message: "City is required" });
+// Find a browser with a ready tab for city search
+async function findCitySearchReadyTab() {
+  const keys = await redis.keys("browser_*");
+  let selectedBrowser = null;
+  let attempts = 0;
+
+  while (!selectedBrowser && attempts < 10) {
+    let minTabsCount = Infinity;
+    for (const key of keys) {
+      const browserData = JSON.parse(await redis.get(key));
+      const readyTab = browserData.tabs.find(
+        (tab) => tab.state === "city_search_ready"
+      );
+      if (readyTab && browserData.numberOfTabs < minTabsCount) {
+        selectedBrowser = { browserData, readyTab };
+        minTabsCount = browserData.numberOfTabs;
+      }
+    }
+    if (!selectedBrowser) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      console.log("Waiting for a ready tab...");
+      attempts++;
+    }
   }
 
-  try {
-    const keys = await redis.keys("browser_*");
-    let selectedBrowser = null;
-    let minTabsCount = Infinity;
-    const findReadyTab = async () => {
-      for (const key of keys) {
-        const browserData = JSON.parse(await redis.get(key));
-        const readyTab = browserData.tabs.find(
-          (tab) => tab.state === "city_search_ready"
-        );
-        if (readyTab && browserData.numberOfTabs < minTabsCount) {
-          return { browserData, readyTab };
-        }
+  return selectedBrowser;
+}
+
+// Connect to a browser and get the page with the city search ready tab
+async function connectToBrowserAndGetCitySearchReadyPage(
+  browserData,
+  readyTab
+) {
+  const browser = await puppeteer.connect({
+    browserWSEndpoint: browserData.wsEndpoint,
+    defaultViewport: { width: 1280, height: 800 },
+    protocolTimeout: 5000, // Increase timeout to 5 seconds
+  });
+
+  const pages = await browser.pages();
+  let page = null;
+
+  // Check for the page using the targetId directly
+  for (const p of pages) {
+    try {
+      const session = await p.createCDPSession();
+      const info = await session.send("Target.getTargetInfo");
+      if (info.targetInfo.targetId === readyTab.targetId) {
+        page = p;
+        break;
       }
-      return null;
-    };
-
-    let attempts = 0;
-    while (!selectedBrowser && attempts < 10) {
-      selectedBrowser = await findReadyTab();
-      if (!selectedBrowser) {
-        await new Promise((resolve) => setTimeout(resolve, 500));
-        console.log("Waiting for a ready tab...");
-        attempts++;
-      }
+    } catch (error) {
+      logger.error("Error checking page target:", error);
     }
+  }
 
-    if (!selectedBrowser) {
-      return res
-        .status(404)
-        .send({ message: "No browser with a ready tab found" });
-    }
-
-    const { browserData, readyTab } = selectedBrowser;
-
-    // Reconnect to the existing browser using the WebSocket endpoint with increased timeout
-    const browser = await puppeteer.connect({
-      browserWSEndpoint: browserData.wsEndpoint,
-      defaultViewport: { width: 1280, height: 800 },
-      protocolTimeout: 5000, // Increase timeout to 60 seconds
-    });
-
-    const pages = await browser.pages();
-    let page = null;
-
-    // Check for the page using the targetId directly
+  // If page is still not found, log the available pages for debugging
+  if (!page) {
+    logger.info("Available pages:");
     for (const p of pages) {
       try {
         const session = await p.createCDPSession();
         const info = await session.send("Target.getTargetInfo");
-        if (info.targetInfo.targetId === readyTab.targetId) {
-          page = p;
-          break;
-        }
-      } catch (error) {
-        logger.error("Error checking page target:", error);
-      }
-    }
-
-    // If page is still not found, log the available pages for debugging
-    if (!page) {
-      logger.info("Available pages:");
-      for (const p of pages) {
-        try {
-          const session = await p.createCDPSession();
-          const info = await session.send("Target.getTargetInfo");
-          logger.info(
-            `Page URL: ${await p.url()}, Target ID: ${info.targetInfo.targetId}`
-          );
-        } catch (error) {
-          logger.error("Error logging page info:", error);
-        }
-      }
-      return res.status(404).send({ message: "Tab page not found" });
-    }
-
-    const inputSelector = 'input[aria-label="Location"]';
-
-    await page.waitForSelector(inputSelector, { timeout: 5000 });
-    await page.focus(inputSelector);
-    await clearAndType(page, inputSelector, city);
-
-    await page.waitForSelector('ul[role="listbox"]', { timeout: 5000 });
-    await page.waitForSelector('ul[role="listbox"] li', { timeout: 10000 });
-
-    let jsonData = null;
-    if (sure === "true") {
-      // Click on the first suggestion
-      await page.click('ul[role="listbox"] li:first-child');
-
-      for (let i = 0; i < 4; i++) {
-        await page.keyboard.press("Tab");
-        await new Promise((r) => setTimeout(r, 100));
-      }
-
-      await page.keyboard.press("Enter");
-
-      // Wait for the URL to change without waiting for all resources to load
-      await page.waitForNavigation({ waitUntil: "domcontentloaded" });
-
-      const currentUrl = page.url();
-      const cityMatch = currentUrl.match(/\/marketplace\/([^/]+)/);
-      const city = cityMatch ? cityMatch[1] : "unknown";
-
-      jsonData = city;
-
-      // Update browser data in Redis
-      browserData.tabs = browserData.tabs.filter(
-        (tab) => tab.targetId !== readyTab.targetId
-      );
-      browserData.numberOfTabs--;
-      await redis.set(browserData.id, JSON.stringify(browserData));
-
-      // Close the tab
-      await page.close();
-
-      try {
-        res.status(200).send({ data: jsonData });
-      } finally {
-        const newTab = await browser.newPage();
-        const newTabData = {
-          targetId: await (async () => {
-            const session = await newTab.createCDPSession();
-            const info = await session.send("Target.getTargetInfo");
-            return info.targetInfo.targetId;
-          })(),
-          url: "about:blank",
-          state: "pending",
-        };
-
-        browserData.tabs.push(newTabData);
-        await redis.set(browserData.id, JSON.stringify(browserData));
-
-        await prepareTabForCitySearch(newTab, browserData, newTabData);
-      }
-    } else {
-      // Extract values from each li element
-      jsonData = await page.evaluate(() => {
-        const items = Array.from(
-          document.querySelectorAll('ul[role="listbox"] li')
+        logger.info(
+          `Page URL: ${await p.url()}, Target ID: ${info.targetInfo.targetId}`
         );
-        return items.map((item) => {
-          const spans = item.querySelectorAll("span");
-          return {
-            firstValue: spans[0] ? spans[0].innerText : null,
-            secondValue: spans[1] ? spans[1].innerText : null,
-          };
-        });
-      });
-      try {
-        res.status(200).send({ data: jsonData });
-      } finally {
-        await clearAndType(page, inputSelector, "asdasdasd");
+      } catch (error) {
+        logger.error("Error logging page info:", error);
       }
     }
-  } catch (error) {
-    logger.error("Error searching city:", error);
-    if (!res.headersSent) {
-      res
-        .status(500)
-        .send({ message: "Error searching city", error: error.message });
-    }
+    throw new Error("Tab page not found");
   }
-});
 
-async function clearAndType(page, selector, value) {
+  return { browser, page };
+}
+
+// Clear the city input and type the desired city
+async function clearCityInputAndTypeDesiredCity(page, selector, value) {
   const maxAttempts = 3;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
@@ -803,6 +719,186 @@ async function clearAndType(page, selector, value) {
     }
   }
 }
+
+// Now update the /search-city endpoint to use this new function
+app.post("/search-city", async (req, res) => {
+  const { city, sure, nSelection } = req.body;
+  if (!city) {
+    return res
+      .status(400)
+      .send({ message: "A city value in the body is required" });
+  }
+
+  try {
+    const selectedBrowser = await findCitySearchReadyTab();
+
+    if (!selectedBrowser) {
+      return res
+        .status(404)
+        .send({ message: "No browser with a city search ready tab found" });
+    }
+
+    const { browserData, readyTab } = selectedBrowser;
+
+    let browser, page;
+    try {
+      ({ browser, page } = await connectToBrowserAndGetCitySearchReadyPage(
+        browserData,
+        readyTab
+      ));
+    } catch (error) {
+      return res.status(404).send({ message: error.message });
+    }
+
+    const inputSelector = 'input[aria-label="Location"]';
+
+    try {
+      await page.waitForSelector(inputSelector, { timeout: 5000 });
+      await page.focus(inputSelector);
+      await clearCityInputAndTypeDesiredCity(page, inputSelector, city);
+      await page.waitForSelector('ul[role="listbox"]', { timeout: 5000 });
+      await page.waitForSelector('ul[role="listbox"] li', { timeout: 5000 });
+    } catch (error) {
+      logger.error("Error in city input and suggestion handling:", error);
+      return res
+        .status(500)
+        .send({
+          message: "Error in city input handling",
+          error: error.message,
+        });
+    }
+
+    const items = await page.$$('ul[role="listbox"] li');
+
+    let jsonData = null;
+
+    // Get the final city ID
+    if (sure === "true") {
+      try {
+        const validSelection = Math.min(
+          Math.max(parseInt(nSelection) || 0, 0),
+          4
+        );
+        console.log("Valid selection:", validSelection);
+        console.log("Items length:", items.length);
+        if (items.length > validSelection) {
+          await items[validSelection].click();
+        } else {
+          await items[0].click(); // Fallback to first item if selection is out of range
+        }
+      } catch (error) {
+        logger.error("Error clicking on city suggestion:", error);
+        return res
+          .status(500)
+          .send({ message: "Error selecting city", error: error.message });
+      }
+
+      try {
+        // Needs to reduce the zoom level to make the button clickable
+        await page.evaluate(() => {
+          const zoomLevels = [40, 50, 60, 70, 80];
+          const randomZoom =
+            zoomLevels[Math.floor(Math.random() * zoomLevels.length)];
+          document.body.style.zoom = `${randomZoom}%`;
+        });
+        await page.click('div[aria-label="Apply"]');
+      } catch (error) {
+        logger.error("Error applying city selection:", error);
+        return res
+          .status(500)
+          .send({
+            message: "Error applying city selection",
+            error: error.message,
+          });
+      }
+
+      try {
+        // Wait for the URL with the city ID to load
+        await page.waitForNavigation({ waitUntil: "domcontentloaded" });
+
+        const currentUrl = page.url();
+        const cityMatch = currentUrl.match(/\/marketplace\/([^/]+)/);
+        const city = cityMatch ? cityMatch[1] : "unknown";
+
+        jsonData = city;
+      } catch (error) {
+        logger.error("Error extracting city ID from URL:", error);
+        return res
+          .status(500)
+          .send({ message: "Error extracting city ID", error: error.message });
+      }
+
+      // Update browser data in Redis
+      browserData.tabs = browserData.tabs.filter(
+        (tab) => tab.targetId !== readyTab.targetId
+      );
+      browserData.numberOfTabs--;
+      await redis.set(browserData.id, JSON.stringify(browserData));
+
+      // Close the tab
+      await page.close();
+
+      try {
+        res.status(200).send({ data: jsonData });
+      } finally {
+        const newTab = await browser.newPage();
+        const newTabData = {
+          targetId: await (async () => {
+            const session = await newTab.createCDPSession();
+            const info = await session.send("Target.getTargetInfo");
+            return info.targetInfo.targetId;
+          })(),
+          url: "about:blank",
+          state: "pending",
+        };
+
+        browserData.tabs.push(newTabData);
+        await redis.set(browserData.id, JSON.stringify(browserData));
+
+        await prepareTabForCitySearch(newTab, browserData, newTabData);
+      }
+
+      // Retrieve all the cities from the dropdown
+    } else {
+      try {
+        // Extract values from each li element
+        jsonData = await page.evaluate(() => {
+          const items = Array.from(
+            document.querySelectorAll('ul[role="listbox"] li')
+          );
+          return items.map((item) => {
+            const spans = item.querySelectorAll("span");
+            return {
+              firstValue: spans[0] ? spans[0].innerText : null,
+              secondValue: spans[1] ? spans[1].innerText : null,
+            };
+          });
+        });
+      } catch (error) {
+        logger.error("Error extracting city suggestions:", error);
+        return res
+          .status(500)
+          .send({
+            message: "Error extracting city suggestions",
+            error: error.message,
+          });
+      }
+
+      try {
+        res.status(200).send({ data: jsonData });
+      } finally {
+        await clearCityInputAndTypeDesiredCity(page, inputSelector, "");
+      }
+    }
+  } catch (error) {
+    logger.error("Error in /search-city:", error);
+    if (!res.headersSent) {
+      res
+        .status(500)
+        .send({ message: "Error in /search-city", error: error.message });
+    }
+  }
+});
 
 // Add this new endpoint
 app.post("/search-products", async (req, res) => {
