@@ -1,0 +1,15 @@
+export const FREE_WORDS = [
+  "Free",
+  "Gratis",
+  "Gratuit",
+  "Livre",
+  "免费",
+  "無料",
+  "무료",
+  "Frei",
+  "Свободный",
+  "Libero",
+  "Besplatno",
+  "Бесплатно",
+  "Grátis",
+];

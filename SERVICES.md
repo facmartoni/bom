@@ -4,11 +4,11 @@ npm start
 
 ## Redis
 
-redis-server
+redis-server config/redis.conf
 
 ## Prometheus
 
-prometheus --config.file=prometheus.yml
+prometheus --config.file=config/prometheus.yml
 
 ## Grafana
 
@@ -16,4 +16,4 @@ sudo grafana-server --homepath /usr/share/grafana --config /etc/grafana/grafana.
 
 ## Loki
 
-loki --config.file=loki-config.yaml
+loki --config.file=config/loki-config.yaml

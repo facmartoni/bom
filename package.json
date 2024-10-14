@@ -12,8 +12,8 @@
     "winston-loki": "^6.1.2"
   },
   "scripts": {
-    "start": "node checkRedis.js && node index.mjs",
-    "dev": "node checkRedis.js && nodemon index.mjs"
+    "start": "node utils/check-redis.js && node index.mjs",
+    "dev": "node utils/check-redis.js && nodemon index.mjs"
   },
   "type": "module"
 }
