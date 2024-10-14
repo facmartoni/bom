@@ -1,5 +1,9 @@
 import redisController from "../utils/redis-controller.mjs";
 import logger from "../utils/loki-logger.js";
+import { launchBrowserIfNeeded } from "./launch-browser.mjs";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 export async function findCitySearchReadyTab() {
   const keys = await redisController.keys("browser_*");
@@ -27,6 +31,7 @@ export async function findCitySearchReadyTab() {
 
   if (!selectedBrowser) {
     logger.warn("Probably ran out of attempts to find a ready tab");
+    await launchBrowserIfNeeded(process.env.PROXIES);
   }
 
   return selectedBrowser;

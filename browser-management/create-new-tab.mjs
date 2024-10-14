@@ -3,7 +3,6 @@ import redisController from "../utils/redis-controller.mjs";
 import logger from "../utils/loki-logger.js";
 
 export async function createNewTab(browserId, url = "about:blank") {
-  logger.info(`Creating new tab for browser: ${browserId}`);
   const browserData = JSON.parse(await redisController.get(browserId));
 
   if (!browserData || !browserData.wsEndpoint) {
@@ -11,13 +10,11 @@ export async function createNewTab(browserId, url = "about:blank") {
     throw new Error("Browser instance not found");
   }
 
-  logger.info(`Connecting to browser: ${browserId}`);
   const browser = await puppeteer.connect({
     browserWSEndpoint: browserData.wsEndpoint,
-    defaultViewport: null, // Set to null to use the window size
+    defaultViewport: null,
   });
 
-  logger.info(`Creating new page in browser: ${browserId}`);
   const page = await browser.newPage();
   await page.authenticate({
     username: browserData.proxy.username,
@@ -33,7 +30,6 @@ export async function createNewTab(browserId, url = "about:blank") {
     window.resizeTo(1920, 1080);
   });
 
-  logger.info(`Navigating to URL: ${url}`);
   await page.goto(url);
 
   const tabId = `tab_${browserData.numberOfTabs + 1}`;
@@ -51,9 +47,7 @@ export async function createNewTab(browserId, url = "about:blank") {
   browserData.numberOfTabs += 1;
   browserData.tabs.push(tabData);
 
-  logger.info(`Updating browser data for ${browserId}`);
   await redisController.set(browserId, JSON.stringify(browserData));
 
-  logger.info(`New tab created: ${tabId} for browser: ${browserId}`);
   return { tabId, page };
 }

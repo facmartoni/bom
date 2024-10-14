@@ -21,7 +21,7 @@ export default async function revealCityInput(page, browserData, tabData) {
       await page.click(allowCookiesSelector);
     }
   } catch (error) {
-    logger.info("No cookie consent popup found or error handling it:", error);
+    logger.info("No cookie consent popup found or error handling it");
   }
 
   // Handle Login Modal
@@ -31,7 +31,7 @@ export default async function revealCityInput(page, browserData, tabData) {
     });
     await page.click('div[role="button"][aria-label="Close"]');
   } catch (error) {
-    logger.info("No login modal found or error closing it:", error);
+    logger.info("No login modal found or error closing it.");
   }
 
   // Click on the seo_filters button

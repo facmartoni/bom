@@ -190,10 +190,6 @@ app.post("/search-products", async (req, res) => {
   }
 
   try {
-    logger.info("Starting /search-products");
-    const initialBrowsers = await getAllBrowsers();
-    logger.info(`Initial browser count: ${initialBrowsers.length}`);
-
     // Start the browser launch process without awaiting it
     launchBrowserIfNeeded(PROXIES);
 
@@ -202,8 +198,6 @@ app.post("/search-products", async (req, res) => {
     const selectedBrowser = browsers.reduce((min, browser) =>
       browser.numberOfTabs < min.numberOfTabs ? browser : min
     );
-
-    logger.info(`Selected browser: ${selectedBrowser.id}`);
 
     // Create a new tab in the selected browser
     const { tabId, page } = await createNewTab(selectedBrowser.id);
@@ -217,8 +211,6 @@ app.post("/search-products", async (req, res) => {
       maxPrice
     );
 
-    logger.info("URL being accessed:", url);
-
     await page.goto(url, { waitUntil: "domcontentloaded" });
 
     // Extract product details
@@ -227,8 +219,6 @@ app.post("/search-products", async (req, res) => {
       FREE_WORDS,
       productLimit
     );
-
-    logger.info("Product details extracted:", productDetails);
 
     // Close the tab
     await page.close();
