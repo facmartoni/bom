@@ -5,10 +5,10 @@ A lightweight microservice for managing Puppeteer browser instances, built with 
 ---
 
 ## Features  
-- Dynamic Browser Management – Spawns and destroys browser instances as needed.  
-- Efficient Resource Allocation – Prevents excessive memory/CPU usage.  
-- Scalability – Handles multiple concurrent scraping tasks.  
-- API-Driven – Exposes RESTful endpoints for browser control.  
+- **Dynamic Browser Management** – Spawns and destroys browser instances as needed.  
+- **Efficient Resource Allocation** – Prevents excessive memory/CPU usage.  
+- **Scalability** – Handles multiple concurrent scraping tasks.  
+- **API-Driven** – Exposes RESTful endpoints for browser control.  
 
 ---
 
